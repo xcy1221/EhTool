@@ -1,0 +1,21 @@
+{
+  "name": "eh-tool",
+  "version": "0.5.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/build.test.mjs tests/core.test.mjs tests/app.test.mjs tests/history.test.mjs tests/gallery.test.mjs tests/comments.test.mjs tests/extension.test.mjs tests/reader.test.mjs",
+    "check": "npm run build && node --check dist/eh-search-tool.user.js && node --check extension/background.js && node --check extension/gallery.js && npm test",
+    "demo": "node scripts/serve.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:reader-browser": "node scripts/reader-smoke.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "playwright": "^1.63.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

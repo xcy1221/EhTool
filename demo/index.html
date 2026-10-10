@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>eh工具 · 本地演示</title>
+<style>
+body { margin:0; padding:32px 18px; background:#eceee6; color:#4b5b45; font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif; }
+main { max-width:900px; margin-left:560px; min-height:1500px; } h1 { font-size:25px; font-weight:600; margin:0; } .intro { color:#829076; margin:4px 0 24px; }
+form { padding:18px; background:#f7f8f0; border:1px solid #d4dbca; border-radius:8px; } input[type=search] { width:min(65%,650px); padding:8px; } button { padding:8px 14px; } .filters { margin-top:10px; font-size:12px; } #submitted { white-space:pre-wrap; overflow-wrap:anywhere; }
+@media(max-width:600px) { main { margin-left:0; } }
+</style>
+<main>
+<h1>eh工具 · 独立浮动面板</h1>
+<p class="intro">本地演示 · 使用基础标签和模拟搜索表单，不访问站点内容。</p>
+<form method="get">
+  <input type="search" name="f_search" aria-label="原站搜索框" placeholder="原站搜索框">
+  <button type="submit" name="f_apply" value="Apply Filter">Apply Filter</button>
+  <div class="filters"><label><input type="checkbox" name="f_sft" value="on" checked> 保留模拟筛选条件</label></div>
+  <button type="button" id="adv_toggle" aria-expanded="false">显示高级选项</button>
+  <div id="advdiv" class="filters" hidden><input type="hidden" name="advsearch" value="1" disabled>介于 <input name="f_spf" size="4" maxlength="4" aria-label="原站最少页数" disabled> 和 <input name="f_spt" size="4" maxlength="4" aria-label="原站最多页数" disabled> 页　最低评分：<select name="f_srdd" aria-label="原站最低评分" disabled><option value="0">不限</option><option value="2">2 星</option><option value="3">3 星</option><option value="4">4 星</option><option value="5">5 星</option></select></div>
+</form>
+<p id="submitted" role="status"></p>
+</main>
+<script>
+document.getElementById('adv_toggle').addEventListener('click', () => {
+  const pane = document.getElementById('advdiv');
+  pane.hidden = !pane.hidden;
+  pane.querySelectorAll('input, select').forEach(field => { field.disabled = pane.hidden; });
+  const toggle = document.getElementById('adv_toggle');
+  toggle.setAttribute('aria-expanded', String(!pane.hidden));
+  toggle.textContent = pane.hidden ? '显示高级选项' : '隐藏高级选项';
+});
+document.querySelector('form').addEventListener('submit', event => {
+  event.preventDefault();
+  document.getElementById('submitted').textContent = '模拟搜索：' + new URLSearchParams(new FormData(event.target, event.submitter)).toString();
+});
+</script>
+<script src="/eh-search-tool.user.js"></script>
+</html>

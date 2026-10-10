@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "eh工具 · 画廊分屏",
+  "version": "0.1.0",
+  "description": "打开画廊后，将详情与阅读页配对为 Chrome 原生分屏。",
+  "minimum_chrome_version": "140",
+  "permissions": ["storage"],
+  "host_permissions": ["https://e-hentai.org/*", "https://exhentai.org/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "eh 画廊分屏：点击暂停或启用" },
+  "content_scripts": [{
+    "matches": ["https://e-hentai.org/g/*", "https://exhentai.org/g/*"],
+    "js": ["gallery.js"],
+    "run_at": "document_idle"
+  }]
+}
