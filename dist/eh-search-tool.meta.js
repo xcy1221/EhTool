@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         eh工具
 // @namespace    https://github.com/xcy1221/EhTool
-// @version      0.5.4
-// @description  左侧浮动eh工具：标签组合与搜索、评论区收起、明暗配色、画廊连续阅读
+// @version      0.5.5
+// @description  左侧浮动eh工具：标签组合与搜索、画廊悬停标签、评论区收起、明暗配色、画廊连续阅读
 // @match        https://e-hentai.org/*
 // @match        https://exhentai.org/*
 // @run-at       document-idle

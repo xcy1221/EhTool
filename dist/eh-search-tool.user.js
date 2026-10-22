@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         eh工具
 // @namespace    https://github.com/xcy1221/EhTool
-// @version      0.5.4
-// @description  左侧浮动eh工具：标签组合与搜索、评论区收起、明暗配色、画廊连续阅读
+// @version      0.5.5
+// @description  左侧浮动eh工具：标签组合与搜索、画廊悬停标签、评论区收起、明暗配色、画廊连续阅读
 // @match        https://e-hentai.org/*
 // @match        https://exhentai.org/*
 // @run-at       document-idle
@@ -139,10 +139,16 @@ function boundedNumber(value, fallback, min, max) {
 function readUI() {
   const raw = readStore(UI_STORE, {});
   const reader = raw?.reader;
+  const hover = raw?.hover;
   return {
     theme: ['light', 'dark'].includes(raw?.theme) ? raw.theme : SITE_THEME,
     sections: raw?.sections && typeof raw.sections === 'object' ? raw.sections : {},
     comments: { enabled: raw?.comments?.enabled !== false, collapsed: raw?.comments?.collapsed === true },
+    hover: {
+      enabled: hover?.enabled !== false,
+      delay: typeof hover?.delay === 'number' && Number.isFinite(hover.delay) && hover.delay >= 0 && hover.delay <= 10 ? hover.delay : 1,
+      groups: Array.isArray(hover?.groups) ? [...new Set(hover.groups.filter(key => Object.hasOwn(NAMESPACES, key)))] : Object.keys(NAMESPACES),
+    },
     reader: {
       ...READER_DEFAULTS,
       enabled: reader?.enabled !== false,
@@ -162,6 +168,7 @@ function updateUI(patch) {
     sections: { ...previous?.sections, ...patch.sections },
     reader: { ...previous?.reader, ...patch.reader },
     comments: { ...previous?.comments, ...patch.comments },
+    hover: { ...previous?.hover, ...patch.hover },
   });
 }
 function setupSections(root, onError) {
@@ -242,6 +249,156 @@ function setupGalleryLinks() {
     enabled = value;
     if (enabled) scan(document.documentElement);
     else { for (const [link, original] of originals) restore(link, original); originals.clear(); }
+  } };
+}
+
+function parseGalleryTags(doc) {
+  const list = doc.getElementById('taglist');
+  if (!list) throw new Error('未找到画廊标签，请检查登录状态或访问权限。');
+  const tags = new Map();
+  for (const node of list.querySelectorAll('[id^="td_"], [id^="ta_"], .gt, .gtl, .gtw')) {
+    const anchor = node.matches('a') ? node : node.querySelector('a');
+    let key = (node.id || anchor?.id || '').replace(/^(?:td|ta)_/, '');
+    if (!key.includes(':') && anchor?.getAttribute('href')) {
+      try { key = decodeURIComponent(new URL(anchor.getAttribute('href'), location.origin).pathname.match(/^\/tag\/(.+)$/)?.[1] || ''); } catch { /* Use the row namespace below. */ }
+    }
+    const row = node.closest('tr');
+    const namespace = row?.querySelector('.tc, td')?.textContent.trim().replace(/:$/, '').toLowerCase();
+    if (!key.includes(':')) key = `${namespace}:${node.textContent.trim()}`;
+    const split = key.indexOf(':');
+    const tag = normalizeTag({ namespace: key.slice(0, split), tag: key.slice(split + 1).replace(/_/g, ' ') });
+    if (tag) tags.set(tagKey(tag), tag);
+  }
+  return { title: (doc.getElementById('gn') || doc.getElementById('gj'))?.textContent.trim() || '画廊标签', tags: [...tags.values()] };
+}
+
+function setupGalleryHover(toolRoot, displayName) {
+  if (/^\/(?:g|s)\//.test(location.pathname) || document.getElementById('eh-gallery-hover')) return;
+  let config = readUI().hover;
+  let hovered = null, timer = null, request = null, revision = 0, current = null;
+  const cache = new Map();
+  const host = document.createElement('aside');
+  host.id = 'eh-gallery-hover'; host.hidden = true;
+  document.body.append(host);
+  const root = host.attachShadow({ mode: 'open' });
+  const style = document.createElement('style'); style.textContent = HOVER_STYLE;
+  root.append(style);
+  const panel = document.createElement('section'); panel.setAttribute('aria-label', '悬停画廊标签');
+  panel.innerHTML = '<header><h2 id="hover-title">画廊标签</h2><button type="button" id="hover-close" aria-label="关闭画廊标签">×</button></header><div id="hover-content" role="status" aria-live="polite"></div>';
+  root.append(panel);
+  const content = root.getElementById('hover-content');
+  function syncTheme() { host.dataset.theme = toolRoot.host.dataset.theme || readUI().theme; }
+  syncTheme();
+  const themeObserver = new MutationObserver(syncTheme);
+  themeObserver.observe(toolRoot.host, { attributes: true, attributeFilter: ['data-theme'] });
+  function place() {
+    const list = document.querySelector('.itg');
+    const gap = list ? window.innerWidth - list.getBoundingClientRect().right - 24 : 320;
+    host.style.width = `${Math.min(360, Math.max(220, gap < 220 ? 280 : gap))}px`;
+  }
+  function message(text) { content.textContent = text; }
+  function render(info) {
+    root.getElementById('hover-title').textContent = info.title;
+    content.replaceChildren();
+    let count = 0;
+    for (const namespace of config.groups) {
+      const tags = info.tags.filter(tag => tag.namespace === namespace);
+      if (!tags.length) continue;
+      const group = document.createElement('div'); group.className = 'tag-group';
+      const heading = document.createElement('h3'); heading.textContent = NAMESPACES[namespace];
+      const chips = document.createElement('div'); chips.className = 'tags';
+      for (const tag of tags) {
+        const chip = document.createElement('span'); chip.className = 'tag';
+        chip.textContent = displayName(tag); chip.title = tagKey(tag); chips.append(chip); count++;
+      }
+      group.append(heading, chips); content.append(group);
+    }
+    if (!count) message(config.groups.length ? '该画廊没有所选组的标签。' : '未选择标签组，请在“设置 → 悬停标签”中勾选。');
+  }
+  function cancel() {
+    clearTimeout(timer); timer = null; revision++;
+    if (request) { clearTimeout(request.timeout); request.controller.abort(); request = null; host.hidden = true; }
+  }
+  function galleryAt(target) {
+    if (!target?.closest || host.contains(target) || toolRoot.host.contains(target)) return null;
+    const element = target.closest('.itg tr') || target.closest('.gl1t, .gl1e, [data-gallery]') || target.closest('a[href]');
+    if (!element) return null;
+    const links = element.matches('a[href]') ? [element] : element.querySelectorAll('a[href]');
+    for (const link of links) {
+      try {
+        const url = new URL(link.href);
+        if (url.origin === location.origin && url.protocol === 'https:' && ['e-hentai.org', 'exhentai.org'].includes(url.hostname) && /^\/g\/\d+\/[a-z0-9]+\/?$/i.test(url.pathname)) {
+          return { element, url: `${url.origin}${url.pathname.replace(/\/?$/, '/')}`, title: element.querySelector('.glink')?.textContent.trim() || link.textContent.trim() || '画廊标签' };
+        }
+      } catch { /* Ignore unrelated links. */ }
+    }
+    return null;
+  }
+  async function show(gallery, ticket) {
+    if (ticket !== revision || !gallery.element.isConnected) return;
+    place(); host.hidden = false; current = null;
+    root.getElementById('hover-title').textContent = gallery.title;
+    if (!config.groups.length) { render({ title: gallery.title, tags: [] }); return; }
+    if (cache.has(gallery.url)) {
+      current = cache.get(gallery.url); cache.delete(gallery.url); cache.set(gallery.url, current); render(current); return;
+    }
+    message('正在读取画廊标签…');
+    const task = { controller: new AbortController(), timeout: null, timedOut: false };
+    request = task;
+    task.timeout = setTimeout(() => { task.timedOut = true; task.controller.abort(); }, 15000);
+    try {
+      const response = await fetch(gallery.url, { credentials: 'same-origin', signal: task.controller.signal });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const finalUrl = new URL(response.url || gallery.url);
+      if (finalUrl.origin !== location.origin || finalUrl.pathname.replace(/\/?$/, '/') !== new URL(gallery.url).pathname) throw new Error('画廊发生跳转，请打开详情页检查。');
+      const html = await response.text();
+      if (ticket !== revision) return;
+      const info = parseGalleryTags(new DOMParser().parseFromString(html, 'text/html'));
+      cache.set(gallery.url, info);
+      if (cache.size > 50) cache.delete(cache.keys().next().value);
+      current = info; render(info);
+    } catch (error) {
+      if (ticket === revision) message(task.timedOut ? '读取超时，移开后重新悬停可重试。' : '标签读取失败：' + error.message + ' 移开后重新悬停可重试。');
+    } finally {
+      clearTimeout(task.timeout);
+      if (request === task) request = null;
+    }
+  }
+  function enter(event) {
+    if (!config.enabled) return;
+    const next = galleryAt(event.target);
+    if (next?.element === hovered?.element && next?.url === hovered?.url) return;
+    cancel(); hovered = next;
+    if (!next) return;
+    host.hidden = true;
+    const ticket = revision;
+    timer = setTimeout(() => show(next, ticket), config.delay * 1000);
+  }
+  function leave(event) {
+    if (!hovered || !hovered.element.contains(event.target)) return;
+    const next = galleryAt(event.relatedTarget);
+    if (next?.element === hovered.element && next.url === hovered.url) return;
+    cancel(); hovered = null;
+  }
+  root.getElementById('hover-close').addEventListener('click', () => { cancel(); host.hidden = true; });
+  document.addEventListener('mouseover', enter);
+  document.addEventListener('mouseout', leave);
+  window.addEventListener('resize', place);
+  const listObserver = new MutationObserver(() => {
+    if (hovered && !hovered.element.isConnected) { cancel(); hovered = null; host.hidden = true; }
+  });
+  listObserver.observe(document.body, { childList: true, subtree: true });
+  window.addEventListener('pagehide', event => {
+    cancel(); hovered = null; host.hidden = true;
+    if (event.persisted) return;
+    document.removeEventListener('mouseover', enter); document.removeEventListener('mouseout', leave);
+    window.removeEventListener('resize', place); themeObserver.disconnect(); listObserver.disconnect();
+  });
+  return { refresh() {
+    config = readUI().hover;
+    if (!config.enabled) { cancel(); hovered = null; host.hidden = true; }
+    else if (current && !host.hidden) render(current);
+    else if (hovered) { const next = hovered; cancel(); timer = setTimeout(() => show(next, revision), config.delay * 1000); }
   } };
 }
 
@@ -688,9 +845,10 @@ function setupGalleryComments() {
   setTimeout(() => observer.disconnect(), 10000);
 }
 
-const STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; left:12px; top:72px; width:540px; max-width:calc(100vw - 24px); z-index:2147482000; display:block; color:var(--text); font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; pointer-events:none; }\n* { box-sizing:border-box; }\n[hidden] { display:none !important; }\nsection { display:flex; flex-direction:column; max-height:calc(100vh - 88px); max-height:calc(100dvh - 88px); background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; pointer-events:auto; }\nheader { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:var(--subtle); border-bottom:1px solid var(--border); flex-shrink:0; }\nh2 { font-size:19px; margin:0; font-weight:650; }\nh3 { font-size:13px; margin:0; } h3 span { color:var(--muted); margin-left:5px; }\n#body { padding:14px 16px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; min-height:0; }\nbutton, input, select, textarea { font:inherit; }\nbutton, .file-button { color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; cursor:pointer; line-height:1.4; }\nbutton:hover, .file-button:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:disabled { opacity:.5; cursor:default; }\nbutton:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, .file-button:focus-within { outline:2px solid var(--accent); outline-offset:2px; }\ninput:not([type=checkbox]):not([type=file]), select, textarea { width:100%; min-width:0; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; min-height:34px; }\ninput[type=checkbox] { accent-color:var(--accent); }\nlabel { display:block; min-width:0; font-size:11px; color:var(--muted); } label input, label select { margin-top:4px; }\n.block-title { margin-bottom:9px; } .native-filters { display:flex; align-items:end; gap:10px; margin-bottom:18px; }\nfieldset { border:0; padding:0; margin:0; min-width:0; flex:1; } legend { padding:0; font-size:11px; color:var(--muted); }\n.native-filters > label { width:84px; flex-shrink:0; } .range { display:flex; align-items:center; gap:5px; } .range label { flex:1; font-size:0; } .range input { font-size:12px; } .range span { color:var(--muted); padding-top:4px; }\n.toolbar { display:flex; gap:8px; align-items:end; } .grow { flex:1; min-width:0; } .toolbar > label:not(.grow) { width:100px; }\n.tabs { display:flex; gap:6px; margin:0 0 10px; } .tabs button { flex:1; font-size:12px; padding:7px; }\n.tabs button[aria-pressed=true] { color:var(--accent); background:var(--hover); border-color:var(--accent-hover); font-weight:600; }\n.exact { display:flex; align-items:center; gap:6px; margin-top:10px; } .exact input { margin:0; }\n.list-meta, .query-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:10px; margin:10px 0 6px; }\n.tag-purpose { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:10px; font-size:11px; color:var(--muted); }\n.tag-purpose button { font-size:11px; padding:5px 9px; }\n[data-add-mode=include] { color:var(--include); border-color:var(--include-border); }\n[data-add-mode=exclude] { color:var(--exclude); border-color:var(--exclude-border); }\n[data-add-mode=or] { color:var(--or); border-color:var(--or-border); }\n[data-add-mode=include][aria-pressed=true] { background:var(--include-solid); color:var(--on-accent); border-color:var(--include-solid); }\n[data-add-mode=exclude][aria-pressed=true] { background:var(--exclude-solid); color:var(--on-accent); border-color:var(--exclude-solid); }\n[data-add-mode=or][aria-pressed=true] { background:var(--or); color:var(--on-accent); border-color:var(--or); }\n#results { display:flex; flex-wrap:wrap; align-content:flex-start; gap:6px; max-height:190px; overflow-y:auto; scrollbar-width:thin; padding:2px; }\n.tag-row { border:1px solid var(--border); border-radius:6px; min-width:0; max-width:100%; padding:5px 10px; background:var(--surface); font-size:12px; overflow-wrap:anywhere; }\n.tag-row.include { border-color:var(--include-border); color:var(--include); background:var(--include-bg); }\n.tag-row.exclude { border-color:var(--exclude-border); color:var(--exclude); background:var(--exclude-bg); }\n.tag-row.or { border-color:var(--or-border); color:var(--or); background:var(--or-bg); }\n.more { text-align:center; } .more button { margin-top:6px; padding:3px 10px; font-size:11px; }\n.selection-title { display:flex; align-items:center; justify-content:space-between; margin-top:15px; border-top:1px solid var(--border); padding-top:12px; }\n.selection-title button { padding:3px 7px; font-size:10px; }\n#selected { margin-top:8px; } .selected-group { border-left:3px solid var(--include-border); background:var(--include-bg); border-radius:4px; padding:8px; margin-top:6px; }\n.selected-group > strong { color:var(--include); font-size:12px; } .selected-group .hint { margin:2px 0 5px; font-size:10px; }\n.selected-group.exclude { border-color:var(--exclude-border); background:var(--exclude-bg); } .selected-group.exclude > strong { color:var(--exclude); }\n.selected-group.or { border-color:var(--or-border); background:var(--or-bg); } .selected-group.or > strong { color:var(--or); }\n.chip { display:flex; align-items:center; gap:4px; margin-top:4px; min-width:0; background:var(--surface); border-radius:4px; padding:4px 5px; }\n.selected-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }\n.chip button { padding:3px 5px; font-size:10px; border-color:transparent; background:transparent; flex-shrink:0; }\n.chip .to-include { color:var(--include); } .chip .to-exclude { color:var(--exclude); } .chip .to-or { color:var(--or); }\n.keywords { margin-top:12px; }\n#query { font:11px/1.6 ui-monospace,Consolas,monospace; background:var(--subtle); resize:vertical; min-height:54px; }\n.small-actions { display:flex; gap:7px; margin-top:8px; } .small-actions button { font-size:11px; padding:5px 7px; }\nfooter { padding:11px 16px; border-top:1px solid var(--border); background:var(--subtle); flex-shrink:0; }\n.search-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }\n.search-actions button { width:100%; }\nbutton.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; } button.primary:hover { background:var(--accent-hover); }\n.hint { font-size:10px; color:var(--muted); margin:4px 0; }\n.empty { color:var(--muted); font-size:11px; margin:8px 0; }\ndetails { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }\nsummary { cursor:pointer; color:var(--muted); font-size:11px; padding:3px 0; }\n.manual { display:flex; align-items:end; flex-wrap:wrap; gap:7px; margin-top:9px; } .manual .grow { flex-basis:100%; }\n.preset-row { display:flex; align-items:end; gap:7px; margin-top:9px; } .preset-row button { font-size:11px; }\n.preset { display:inline-flex; margin:7px 5px 0 0; } .preset button { padding:5px 7px; font-size:11px; }\n.dictionary { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .dictionary > div { width:100%; }\n.dictionary strong { font-size:11px; } .dictionary button, .file-button { font-size:11px; }\n.file-button { position:relative; overflow:hidden; } .file-button input { position:absolute; opacity:0; inset:0; width:100%; cursor:pointer; }\na { color:var(--include); font-size:10px; }\n#status { margin:5px 0 0; font-size:11px; color:var(--include); overflow-wrap:anywhere; }\n.error, #status.error { color:var(--exclude); }\n#launcher { pointer-events:auto; padding:10px 12px; background:var(--accent); color:var(--on-accent); border-color:var(--accent); box-shadow:0 4px 16px var(--shadow); }\n@media(max-width:600px) { :host { top:12px; } section { max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); } }\n\n.header-actions { display:flex; gap:6px; flex-shrink:0; }\n.block { margin:0 0 12px; border:1px solid var(--border); border-radius:7px; padding:0; }\n.block > summary { padding:9px 10px; color:var(--text); font-size:12px; font-weight:600; background:var(--subtle); border-radius:6px; }\n.block > summary span { color:var(--muted); font-size:11px; font-weight:400; margin-left:8px; }\n.block-content { padding:10px; }\n.block-content > details:first-child { margin-top:0; }\n.native-filters { margin-bottom:0; }\n.selection-title { margin-top:0; border:0; padding-top:0; }\n.reading-options { display:flex; gap:10px; margin-top:10px; }\n.reading-options label { flex:1; }\n@media(max-width:420px) { header { padding:10px; gap:6px; } header .hint { max-width:140px; } #body { padding:10px; } footer { padding:10px; } }\n";
+const STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; left:12px; top:72px; width:540px; max-width:calc(100vw - 24px); z-index:2147482000; display:block; color:var(--text); font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; pointer-events:none; }\n* { box-sizing:border-box; }\n[hidden] { display:none !important; }\nsection { display:flex; flex-direction:column; max-height:calc(100vh - 88px); max-height:calc(100dvh - 88px); background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; pointer-events:auto; }\nheader { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:var(--subtle); border-bottom:1px solid var(--border); flex-shrink:0; }\nh2 { font-size:19px; margin:0; font-weight:650; }\nh3 { font-size:13px; margin:0; } h3 span { color:var(--muted); margin-left:5px; }\n#body { padding:14px 16px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; min-height:0; }\nbutton, input, select, textarea { font:inherit; }\nbutton, .file-button { color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; cursor:pointer; line-height:1.4; }\nbutton:hover, .file-button:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:disabled { opacity:.5; cursor:default; }\nbutton:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, .file-button:focus-within { outline:2px solid var(--accent); outline-offset:2px; }\ninput:not([type=checkbox]):not([type=file]), select, textarea { width:100%; min-width:0; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; min-height:34px; }\ninput[type=checkbox] { accent-color:var(--accent); }\nlabel { display:block; min-width:0; font-size:11px; color:var(--muted); } label input, label select { margin-top:4px; }\n.block-title { margin-bottom:9px; } .native-filters { display:flex; align-items:end; gap:10px; margin-bottom:18px; }\nfieldset { border:0; padding:0; margin:0; min-width:0; flex:1; } legend { padding:0; font-size:11px; color:var(--muted); }\n.native-filters > label { width:84px; flex-shrink:0; } .range { display:flex; align-items:center; gap:5px; } .range label { flex:1; font-size:0; } .range input { font-size:12px; } .range span { color:var(--muted); padding-top:4px; }\n.toolbar { display:flex; gap:8px; align-items:end; } .grow { flex:1; min-width:0; } .toolbar > label:not(.grow) { width:100px; }\n.tabs { display:flex; gap:6px; margin:0 0 10px; } .tabs button { flex:1; font-size:12px; padding:7px; }\n.tabs button[aria-pressed=true] { color:var(--accent); background:var(--hover); border-color:var(--accent-hover); font-weight:600; }\n.exact { display:flex; align-items:center; gap:6px; margin-top:10px; } .exact input { margin:0; }\n.list-meta, .query-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:10px; margin:10px 0 6px; }\n.tag-purpose { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:10px; font-size:11px; color:var(--muted); }\n.tag-purpose button { font-size:11px; padding:5px 9px; }\n[data-add-mode=include] { color:var(--include); border-color:var(--include-border); }\n[data-add-mode=exclude] { color:var(--exclude); border-color:var(--exclude-border); }\n[data-add-mode=or] { color:var(--or); border-color:var(--or-border); }\n[data-add-mode=include][aria-pressed=true] { background:var(--include-solid); color:var(--on-accent); border-color:var(--include-solid); }\n[data-add-mode=exclude][aria-pressed=true] { background:var(--exclude-solid); color:var(--on-accent); border-color:var(--exclude-solid); }\n[data-add-mode=or][aria-pressed=true] { background:var(--or); color:var(--on-accent); border-color:var(--or); }\n#results { display:flex; flex-wrap:wrap; align-content:flex-start; gap:6px; max-height:190px; overflow-y:auto; scrollbar-width:thin; padding:2px; }\n.tag-row { border:1px solid var(--border); border-radius:6px; min-width:0; max-width:100%; padding:5px 10px; background:var(--surface); font-size:12px; overflow-wrap:anywhere; }\n.tag-row.include { border-color:var(--include-border); color:var(--include); background:var(--include-bg); }\n.tag-row.exclude { border-color:var(--exclude-border); color:var(--exclude); background:var(--exclude-bg); }\n.tag-row.or { border-color:var(--or-border); color:var(--or); background:var(--or-bg); }\n.more { text-align:center; } .more button { margin-top:6px; padding:3px 10px; font-size:11px; }\n.selection-title { display:flex; align-items:center; justify-content:space-between; margin-top:15px; border-top:1px solid var(--border); padding-top:12px; }\n.selection-title button { padding:3px 7px; font-size:10px; }\n#selected { margin-top:8px; } .selected-group { border-left:3px solid var(--include-border); background:var(--include-bg); border-radius:4px; padding:8px; margin-top:6px; }\n.selected-group > strong { color:var(--include); font-size:12px; } .selected-group .hint { margin:2px 0 5px; font-size:10px; }\n.selected-group.exclude { border-color:var(--exclude-border); background:var(--exclude-bg); } .selected-group.exclude > strong { color:var(--exclude); }\n.selected-group.or { border-color:var(--or-border); background:var(--or-bg); } .selected-group.or > strong { color:var(--or); }\n.chip { display:flex; align-items:center; gap:4px; margin-top:4px; min-width:0; background:var(--surface); border-radius:4px; padding:4px 5px; }\n.selected-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }\n.chip button { padding:3px 5px; font-size:10px; border-color:transparent; background:transparent; flex-shrink:0; }\n.chip .to-include { color:var(--include); } .chip .to-exclude { color:var(--exclude); } .chip .to-or { color:var(--or); }\n.keywords { margin-top:12px; }\n#query { font:11px/1.6 ui-monospace,Consolas,monospace; background:var(--subtle); resize:vertical; min-height:54px; }\n.small-actions { display:flex; gap:7px; margin-top:8px; } .small-actions button { font-size:11px; padding:5px 7px; }\nfooter { padding:11px 16px; border-top:1px solid var(--border); background:var(--subtle); flex-shrink:0; }\n.search-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }\n.search-actions button { width:100%; }\nbutton.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; } button.primary:hover { background:var(--accent-hover); }\n.hint { font-size:10px; color:var(--muted); margin:4px 0; }\n.empty { color:var(--muted); font-size:11px; margin:8px 0; }\ndetails { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }\nsummary { cursor:pointer; color:var(--muted); font-size:11px; padding:3px 0; }\n.manual { display:flex; align-items:end; flex-wrap:wrap; gap:7px; margin-top:9px; } .manual .grow { flex-basis:100%; }\n.preset-row { display:flex; align-items:end; gap:7px; margin-top:9px; } .preset-row button { font-size:11px; }\n.preset { display:inline-flex; margin:7px 5px 0 0; } .preset button { padding:5px 7px; font-size:11px; }\n.dictionary { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .dictionary > div { width:100%; }\n.dictionary strong { font-size:11px; } .dictionary button, .file-button { font-size:11px; }\n.file-button { position:relative; overflow:hidden; } .file-button input { position:absolute; opacity:0; inset:0; width:100%; cursor:pointer; }\na { color:var(--include); font-size:10px; }\n#status { margin:5px 0 0; font-size:11px; color:var(--include); overflow-wrap:anywhere; }\n.error, #status.error { color:var(--exclude); }\n#launcher { pointer-events:auto; padding:10px 12px; background:var(--accent); color:var(--on-accent); border-color:var(--accent); box-shadow:0 4px 16px var(--shadow); }\n@media(max-width:600px) { :host { top:12px; } section { max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); } }\n\n.header-actions { display:flex; gap:6px; flex-shrink:0; }\n.block { margin:0 0 12px; border:1px solid var(--border); border-radius:7px; padding:0; }\n.block > summary { padding:9px 10px; color:var(--text); font-size:12px; font-weight:600; background:var(--subtle); border-radius:6px; }\n.block > summary span { color:var(--muted); font-size:11px; font-weight:400; margin-left:8px; }\n.block-content { padding:10px; }\n.block-content > details:first-child { margin-top:0; }\n.native-filters { margin-bottom:0; }\n.selection-title { margin-top:0; border:0; padding-top:0; }\n.reading-options { display:flex; gap:10px; margin-top:10px; }\n.reading-options label { flex:1; }\n@media(max-width:420px) { header { padding:10px; gap:6px; } header .hint { max-width:140px; } #body { padding:10px; } footer { padding:10px; } }\n\n#hover-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:10px; }\n#hover-groups legend { margin-bottom:4px; }\n#hover-delay { max-width:120px; }\n";
 const READER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; inset:0; z-index:2147481000; display:flex; flex-direction:column; background:var(--subtle); color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host(.inactive) { inset:auto auto 12px 12px; background:transparent; }\n* { box-sizing:border-box; } [hidden] { display:none !important; }\nheader { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }\n#reader-progress { flex:1; color:var(--muted); white-space:nowrap; }\nbutton, summary, input { font:inherit; }\nbutton, summary { border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--text); padding:5px 9px; cursor:pointer; }\nbutton:hover, summary:hover { background:var(--hover); }\nbutton:focus-visible, summary:focus-visible, input:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\na { color:var(--text); }\ndetails > summary { list-style:none; } details { position:relative; }\n.reader-settings { position:absolute; top:38px; right:0; width:270px; max-height:calc(100dvh - 64px); overflow-y:auto; max-width:calc(100vw - 24px); padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:7px; box-shadow:0 4px 20px var(--shadow); z-index:2; }\n.reader-settings label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; gap:8px; }\n.reader-settings input { width:80px; min-width:0; background:var(--subtle); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:4px; }\n#reader-status { color:var(--muted); margin:5px 0 0; font-size:12px; }\n#reader-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; outline:none; overflow-anchor:none; }\n#reader-pages { display:flex; flex-direction:column; align-items:center; padding:8px 0; min-height:100%; overflow-anchor:none; }\nfigure { position:relative; flex-shrink:0; max-width:100%; margin:0; background:var(--surface); overflow:hidden; overflow-anchor:none; }\nfigure > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }\nfigcaption { position:absolute; left:6px; top:6px; padding:2px 6px; border-radius:4px; color:var(--muted); background:var(--surface); font-size:11px; opacity:.8; z-index:1; pointer-events:none; }\n.placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--muted); text-align:center; }\n@media(max-width:480px) { header { padding:6px; gap:5px; } header strong { display:none; } button,summary { padding:5px 7px; font-size:12px; } .reader-settings { position:fixed; top:48px; right:8px; } }\n\n.reader-hint { color:var(--muted); font-size:12px; margin:8px 0; }\n";
 const COMMENTS_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { display:block; margin:12px auto; max-width:100%; font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; }\ndiv { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; background:var(--subtle); color:var(--text); border:1px solid var(--border); border-radius:7px; }\nbutton { font:inherit; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 10px; cursor:pointer; }\nbutton:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n";
+const HOVER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; right:12px; top:72px; width:320px; max-width:calc(100vw - 24px); z-index:2147482001; color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host([hidden]) { display:none; }\n* { box-sizing:border-box; }\nsection { background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; }\nheader { display:flex; align-items:start; gap:8px; padding:12px; background:var(--subtle); border-bottom:1px solid var(--border); }\nh2 { flex:1; min-width:0; margin:0; font-size:14px; overflow-wrap:anywhere; }\nbutton { flex-shrink:0; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:5px; background:var(--surface); cursor:pointer; }\nbutton:hover { background:var(--hover); }\nbutton:focus-visible { outline:2px solid var(--accent); }\n#hover-content { padding:12px; overflow-y:auto; max-height:calc(100vh - 190px); max-height:calc(100dvh - 190px); scrollbar-width:thin; }\n.tag-group + .tag-group { margin-top:12px; }\nh3 { margin:0 0 5px; color:var(--muted); font-size:12px; }\n.tags { display:flex; flex-wrap:wrap; gap:5px; }\n.tag { padding:3px 7px; border:1px solid var(--border); border-radius:5px; background:var(--subtle); overflow-wrap:anywhere; max-width:100%; }\n@media(max-width:900px) { :host { top:auto; bottom:12px; } #hover-content { max-height:35vh; max-height:35dvh; } }\n";
 const DICTIONARY = 'eh-search-tool:dictionary:v1';
 const DICTIONARY_URL = 'https://raw.githubusercontent.com/EhTagTranslation/DatabaseReleases/master/db.text.json';
 const galleryLinks = setupGalleryLinks();
@@ -745,6 +903,7 @@ function mount(input) {
         <div id="presets"></div>
       </div></details>
       <details class="block" data-section="settings"><summary>设置</summary><div class="block-content"><details data-section="site"><summary>站点行为</summary><label class="exact"><input id="gallery-new-tab" type="checkbox" checked> 点击画廊时在新标签页打开</label><label class="exact"><input id="gallery-focus" type="checkbox" checked> 打开画廊后切换到新标签页</label><p id="gallery-focus-hint" class="hint"></p></details>
+      <details data-section="hover"><summary>悬停标签</summary><label class="exact"><input id="hover-enabled" type="checkbox"> 悬停画廊后在右侧显示标签</label><label>悬停等待（秒）<input id="hover-delay" type="number" min="0" max="10" step="0.1"></label><fieldset id="hover-groups"><legend>显示的标签组</legend></fieldset><p class="hint">默认等待 1 秒，支持 0–10 秒；移开后保留预览，可点击 × 关闭。首次悬停需读取画廊详情页。窄屏显示在右下角。</p></details>
       <details data-section="comments"><summary>评论区设置</summary><label class="exact"><input id="comments-enabled" type="checkbox"> 画廊详情页显示评论区收起按钮</label><label class="exact"><input id="comments-collapsed" type="checkbox"> 打开画廊时默认收起评论区</label><p class="hint">详情页可随时展开或收起；设置在下次打开画廊时生效。</p></details>
       <details data-section="dictionary"><summary>词库与高级设置</summary>
         <label class="exact"><input id="exact" type="checkbox" checked> 新添加的标签使用完整名称匹配</label>
@@ -1009,6 +1168,33 @@ function mount(input) {
     $('gallery-focus-hint').textContent = supported ? '取消勾选后在后台打开画廊，继续浏览当前页面。' : '控制标签页切换需要 Tampermonkey 的 GM_openInTab 权限；本地演示沿用浏览器行为。';
   }
   renderGalleryFocus();
+  const galleryHover = setupGalleryHover(root, displayName);
+  for (const [key, name] of Object.entries(NAMESPACES)) {
+    const label = document.createElement('label'); label.className = 'exact';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = key;
+    checkbox.dataset.hoverGroup = key;
+    label.append(checkbox, document.createTextNode(`${name} · ${key}`)); $('hover-groups').append(label);
+  }
+  function renderHoverSettings() {
+    const settings = readUI().hover;
+    $('hover-enabled').checked = settings.enabled;
+    $('hover-delay').value = settings.delay; $('hover-delay').disabled = !settings.enabled;
+    $('hover-groups').disabled = !settings.enabled;
+    root.querySelectorAll('[data-hover-group]').forEach(control => { control.checked = settings.groups.includes(control.value); });
+  }
+  function saveHover(patch) {
+    try { updateUI({ hover: patch }); galleryHover?.refresh(); status('悬停标签设置已保存。'); }
+    catch { status('无法保存悬停标签设置。', true); }
+    renderHoverSettings();
+  }
+  renderHoverSettings();
+  $('hover-enabled').addEventListener('change', () => saveHover({ enabled: $('hover-enabled').checked }));
+  $('hover-delay').addEventListener('change', () => {
+    const control = $('hover-delay'), delay = Number(control.value);
+    if (control.value === '' || !Number.isFinite(delay) || delay < 0 || delay > 10) { renderHoverSettings(); status('悬停等待请填写 0–10 秒。', true); return; }
+    saveHover({ delay });
+  });
+  $('hover-groups').addEventListener('change', () => saveHover({ groups: [...root.querySelectorAll('[data-hover-group]:checked')].map(control => control.value) }));
   const commentsPrefs = readUI().comments;
   $('comments-enabled').checked = commentsPrefs.enabled;
   $('comments-collapsed').checked = commentsPrefs.collapsed;

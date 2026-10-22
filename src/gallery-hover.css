@@ -1,0 +1,15 @@
+:host { position:fixed; right:12px; top:72px; width:320px; max-width:calc(100vw - 24px); z-index:2147482001; color:var(--text); font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif; text-align:left; }
+:host([hidden]) { display:none; }
+* { box-sizing:border-box; }
+section { background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; }
+header { display:flex; align-items:start; gap:8px; padding:12px; background:var(--subtle); border-bottom:1px solid var(--border); }
+h2 { flex:1; min-width:0; margin:0; font-size:14px; overflow-wrap:anywhere; }
+button { flex-shrink:0; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:5px; background:var(--surface); cursor:pointer; }
+button:hover { background:var(--hover); }
+button:focus-visible { outline:2px solid var(--accent); }
+#hover-content { padding:12px; overflow-y:auto; max-height:calc(100vh - 190px); max-height:calc(100dvh - 190px); scrollbar-width:thin; }
+.tag-group + .tag-group { margin-top:12px; }
+h3 { margin:0 0 5px; color:var(--muted); font-size:12px; }
+.tags { display:flex; flex-wrap:wrap; gap:5px; }
+.tag { padding:3px 7px; border:1px solid var(--border); border-radius:5px; background:var(--subtle); overflow-wrap:anywhere; max-width:100%; }
+@media(max-width:900px) { :host { top:auto; bottom:12px; } #hover-content { max-height:35vh; max-height:35dvh; } }

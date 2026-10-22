@@ -4,7 +4,7 @@ const header = `// ==UserScript==
 // @name         eh工具
 // @namespace    https://github.com/xcy1221/EhTool
 // @version      ${version}
-// @description  左侧浮动eh工具：标签组合与搜索、评论区收起、明暗配色、画廊连续阅读
+// @description  左侧浮动eh工具：标签组合与搜索、画廊悬停标签、评论区收起、明暗配色、画廊连续阅读
 // @match        https://e-hentai.org/*
 // @match        https://exhentai.org/*
 // @run-at       document-idle
@@ -20,8 +20,8 @@ const header = `// ==UserScript==
 // @downloadURL  https://raw.githubusercontent.com/xcy1221/EhTool/main/dist/eh-search-tool.user.js
 // ==/UserScript==
 `;
-const [core, config, links, reader, comments, app, theme, css, readerCss, commentsCss] = await Promise.all(['src/core.js', 'src/config.js', 'src/gallery-links.js', 'src/reader.js', 'src/comments.js', 'src/app.js', 'src/theme.css', 'src/style.css', 'src/reader.css', 'src/comments.css'].map(path => readFile(path, 'utf8')));
+const [core, config, links, hover, reader, comments, app, theme, css, readerCss, commentsCss, hoverCss] = await Promise.all(['src/core.js', 'src/config.js', 'src/gallery-links.js', 'src/gallery-hover.js', 'src/reader.js', 'src/comments.js', 'src/app.js', 'src/theme.css', 'src/style.css', 'src/reader.css', 'src/comments.css', 'src/gallery-hover.css'].map(path => readFile(path, 'utf8')));
 await mkdir('dist', { recursive: true });
-await writeFile('dist/eh-search-tool.user.js', `${header}\n(() => {\n'use strict';\n${core}\n${config}\n${links}\n${reader}\n${comments}\nconst STYLE = ${JSON.stringify(theme + '\n' + css)};\nconst READER_STYLE = ${JSON.stringify(theme + '\n' + readerCss)};\nconst COMMENTS_STYLE = ${JSON.stringify(theme + '\n' + commentsCss)};\n${app}\n})();\n`);
+await writeFile('dist/eh-search-tool.user.js', `${header}\n(() => {\n'use strict';\n${core}\n${config}\n${links}\n${hover}\n${reader}\n${comments}\nconst STYLE = ${JSON.stringify(theme + '\n' + css)};\nconst READER_STYLE = ${JSON.stringify(theme + '\n' + readerCss)};\nconst COMMENTS_STYLE = ${JSON.stringify(theme + '\n' + commentsCss)};\nconst HOVER_STYLE = ${JSON.stringify(theme + '\n' + hoverCss)};\n${app}\n})();\n`);
 await writeFile('dist/eh-search-tool.meta.js', header);
 console.log('Built userscript and update metadata (' + version + ')');

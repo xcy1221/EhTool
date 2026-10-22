@@ -52,6 +52,7 @@ function mount(input) {
         <div id="presets"></div>
       </div></details>
       <details class="block" data-section="settings"><summary>设置</summary><div class="block-content"><details data-section="site"><summary>站点行为</summary><label class="exact"><input id="gallery-new-tab" type="checkbox" checked> 点击画廊时在新标签页打开</label><label class="exact"><input id="gallery-focus" type="checkbox" checked> 打开画廊后切换到新标签页</label><p id="gallery-focus-hint" class="hint"></p></details>
+      <details data-section="hover"><summary>悬停标签</summary><label class="exact"><input id="hover-enabled" type="checkbox"> 悬停画廊后在右侧显示标签</label><label>悬停等待（秒）<input id="hover-delay" type="number" min="0" max="10" step="0.1"></label><fieldset id="hover-groups"><legend>显示的标签组</legend></fieldset><p class="hint">默认等待 1 秒，支持 0–10 秒；移开后保留预览，可点击 × 关闭。首次悬停需读取画廊详情页。窄屏显示在右下角。</p></details>
       <details data-section="comments"><summary>评论区设置</summary><label class="exact"><input id="comments-enabled" type="checkbox"> 画廊详情页显示评论区收起按钮</label><label class="exact"><input id="comments-collapsed" type="checkbox"> 打开画廊时默认收起评论区</label><p class="hint">详情页可随时展开或收起；设置在下次打开画廊时生效。</p></details>
       <details data-section="dictionary"><summary>词库与高级设置</summary>
         <label class="exact"><input id="exact" type="checkbox" checked> 新添加的标签使用完整名称匹配</label>
@@ -316,6 +317,33 @@ function mount(input) {
     $('gallery-focus-hint').textContent = supported ? '取消勾选后在后台打开画廊，继续浏览当前页面。' : '控制标签页切换需要 Tampermonkey 的 GM_openInTab 权限；本地演示沿用浏览器行为。';
   }
   renderGalleryFocus();
+  const galleryHover = setupGalleryHover(root, displayName);
+  for (const [key, name] of Object.entries(NAMESPACES)) {
+    const label = document.createElement('label'); label.className = 'exact';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = key;
+    checkbox.dataset.hoverGroup = key;
+    label.append(checkbox, document.createTextNode(`${name} · ${key}`)); $('hover-groups').append(label);
+  }
+  function renderHoverSettings() {
+    const settings = readUI().hover;
+    $('hover-enabled').checked = settings.enabled;
+    $('hover-delay').value = settings.delay; $('hover-delay').disabled = !settings.enabled;
+    $('hover-groups').disabled = !settings.enabled;
+    root.querySelectorAll('[data-hover-group]').forEach(control => { control.checked = settings.groups.includes(control.value); });
+  }
+  function saveHover(patch) {
+    try { updateUI({ hover: patch }); galleryHover?.refresh(); status('悬停标签设置已保存。'); }
+    catch { status('无法保存悬停标签设置。', true); }
+    renderHoverSettings();
+  }
+  renderHoverSettings();
+  $('hover-enabled').addEventListener('change', () => saveHover({ enabled: $('hover-enabled').checked }));
+  $('hover-delay').addEventListener('change', () => {
+    const control = $('hover-delay'), delay = Number(control.value);
+    if (control.value === '' || !Number.isFinite(delay) || delay < 0 || delay > 10) { renderHoverSettings(); status('悬停等待请填写 0–10 秒。', true); return; }
+    saveHover({ delay });
+  });
+  $('hover-groups').addEventListener('change', () => saveHover({ groups: [...root.querySelectorAll('[data-hover-group]:checked')].map(control => control.value) }));
   const commentsPrefs = readUI().comments;
   $('comments-enabled').checked = commentsPrefs.enabled;
   $('comments-collapsed').checked = commentsPrefs.collapsed;

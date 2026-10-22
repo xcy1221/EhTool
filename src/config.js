@@ -18,10 +18,16 @@ function boundedNumber(value, fallback, min, max) {
 function readUI() {
   const raw = readStore(UI_STORE, {});
   const reader = raw?.reader;
+  const hover = raw?.hover;
   return {
     theme: ['light', 'dark'].includes(raw?.theme) ? raw.theme : SITE_THEME,
     sections: raw?.sections && typeof raw.sections === 'object' ? raw.sections : {},
     comments: { enabled: raw?.comments?.enabled !== false, collapsed: raw?.comments?.collapsed === true },
+    hover: {
+      enabled: hover?.enabled !== false,
+      delay: typeof hover?.delay === 'number' && Number.isFinite(hover.delay) && hover.delay >= 0 && hover.delay <= 10 ? hover.delay : 1,
+      groups: Array.isArray(hover?.groups) ? [...new Set(hover.groups.filter(key => Object.hasOwn(NAMESPACES, key)))] : Object.keys(NAMESPACES),
+    },
     reader: {
       ...READER_DEFAULTS,
       enabled: reader?.enabled !== false,
@@ -41,6 +47,7 @@ function updateUI(patch) {
     sections: { ...previous?.sections, ...patch.sections },
     reader: { ...previous?.reader, ...patch.reader },
     comments: { ...previous?.comments, ...patch.comments },
+    hover: { ...previous?.hover, ...patch.hover },
   });
 }
 function setupSections(root, onError) {
