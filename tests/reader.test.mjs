@@ -153,19 +153,29 @@ test('pagehide cancels reading and a cached page restore can resume cleanly', as
 });
 
 test('auto paging settings validate, persist and never resume without a user action', () => {
-  const app = open(1, { reader: { autoMode: 'invalid', autoInterval: 0, autoSpeed: -1 } });
+  const app = open(1, { reader: { autoMode: 'invalid', autoInterval: 0, autoSpeed: -1, autoSpeedUnit: 'invalid', autoPageSeconds: 0 } });
   const field = id => app.root.getElementById(id);
   function change(id, value) { field(id).value = value; field(id).dispatchEvent(new app.window.Event('change')); }
   try {
     assert.equal(field('reader-auto-mode').value, 'page');
     assert.equal(field('reader-auto-interval').value, '5');
     assert.equal(field('reader-auto-speed').value, '40');
+    assert.equal(field('reader-auto-speed-unit').value, 'pixels');
+    assert.equal(field('reader-auto-page-seconds').value, '20');
     change('reader-auto-mode', 'smooth'); change('reader-auto-interval', '2'); change('reader-auto-speed', '150');
     change('reader-auto-interval', '301'); change('reader-auto-speed', '');
     assert.equal(field('reader-auto-interval').value, '2');
     assert.equal(field('reader-auto-speed').value, '150');
     assert.equal(field('reader-auto-interval-label').hidden, true);
     assert.equal(field('reader-auto-speed-label').hidden, false);
+    change('reader-auto-speed-unit', 'seconds'); change('reader-auto-page-seconds', '12');
+    for (const value of ['0', '301', '', '1.5']) change('reader-auto-page-seconds', value);
+    assert.equal(field('reader-auto-page-seconds').value, '12');
+    assert.equal(field('reader-auto-speed-label').hidden, true);
+    assert.equal(field('reader-auto-page-seconds-label').hidden, false);
+    change('reader-auto-speed-unit', 'pixels');
+    assert.equal(field('reader-auto-speed').value, '150');
+    change('reader-auto-speed-unit', 'seconds');
     field('reader-auto-toggle').click();
     assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'true');
     Object.defineProperty(app.window.document, 'hidden', { value: true, configurable: true });
@@ -175,6 +185,8 @@ test('auto paging settings validate, persist and never resume without a user act
     field('reader-close').click(); field('reader-start').click();
     assert.equal(field('reader-auto-mode').value, 'smooth');
     assert.equal(field('reader-auto-speed').value, '150');
+    assert.equal(field('reader-auto-speed-unit').value, 'seconds');
+    assert.equal(field('reader-auto-page-seconds').value, '12');
     assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'false');
     assert.equal(app.store.has('eh-search-tool:v1'), false);
     field('reader-auto-toggle').click();

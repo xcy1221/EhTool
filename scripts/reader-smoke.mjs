@@ -19,6 +19,18 @@ function html(index, origin, broken = false, total = 22) {
     '<a href="/g/123/abcdef/">Gallery</a><img id="img" width="' + width + '" height="' + height + '" src="https://reader-images.invalid/' + (broken ? 'broken' : index) + '.svg">' +
     '<script>document.addEventListener("keydown",e=>{if(["ArrowDown"," ","d"].includes(e.key)) window.nativeKeyEvents=(window.nativeKeyEvents||0)+1;});</script>';
 }
+async function sampleMotion(scroll) {
+  return scroll.evaluate(scroll => new Promise(resolve => {
+    const figure = scroll.getRootNode().querySelector('figure'), frames = [];
+    function frame(time) {
+      frames.push({ time, top: figure.getBoundingClientRect().top });
+      if (frames.length < 46) { requestAnimationFrame(frame); return; }
+      const steps = frames.slice(1).map((entry, index) => frames[index].top - entry.top);
+      resolve({ distance: frames[0].top - frames.at(-1).top, seconds: (frames.at(-1).time - frames[0].time) / 1000, height: scroll.clientHeight, stationary: steps.filter(step => Math.abs(step) < 0.001).length, backwards: steps.filter(step => step < -0.001).length });
+    }
+    requestAnimationFrame(frame);
+  }));
+}
 try {
   for (const origin of ['https://e-hentai.org', 'https://exhentai.org']) {
     const context = await browser.newContext({ viewport: { width: 1200, height: 1100 } });
@@ -143,6 +155,30 @@ try {
     const pausedTop = await host.locator('#reader-scroll').evaluate(el => el.scrollTop);
     await page.waitForTimeout(150);
     assert.equal(await host.locator('#reader-scroll').evaluate(el => el.scrollTop), pausedTop);
+    await autoSettings.locator('summary').click();
+    await host.locator('#reader-auto-speed').fill('40'); await host.locator('#reader-auto-speed').press('Tab');
+    await autoSettings.locator('summary').click();
+    await auto.click();
+    const lowSpeed = await sampleMotion(host.locator('#reader-scroll'));
+    assert.equal(lowSpeed.stationary, 0, 'Low-speed scrolling must move visually on every frame');
+    assert.equal(lowSpeed.backwards, 0, 'Smooth scrolling must not jump backwards');
+    assert.ok(Math.abs(lowSpeed.distance - lowSpeed.seconds * 40) < 2, 'Pixel speed must remain accurate');
+    await auto.click();
+    assert.equal(await host.locator('#reader-pages').evaluate(el => el.style.transform), '', 'Pausing must clear the visual offset');
+    await autoSettings.locator('summary').click();
+    await host.locator('#reader-auto-speed-unit').selectOption('seconds');
+    assert.equal(await host.locator('#reader-auto-speed').isVisible(), false);
+    await host.locator('#reader-auto-page-seconds').fill('3'); await host.locator('#reader-auto-page-seconds').press('Tab');
+    await page.screenshot({ path: 'test-results/reader-seconds-per-page.png' });
+    await autoSettings.locator('summary').click();
+    await auto.click();
+    const secondsPerPage = await sampleMotion(host.locator('#reader-scroll'));
+    assert.ok(Math.abs(secondsPerPage.distance - secondsPerPage.height * secondsPerPage.seconds / 3) < 2, 'Seconds/page must use the reading viewport height');
+    await page.setViewportSize({ width: 390, height: 700 }); await page.waitForTimeout(100);
+    const resizedPace = await sampleMotion(host.locator('#reader-scroll'));
+    assert.ok(Math.abs(resizedPace.distance - resizedPace.height * resizedPace.seconds / 3) < 2, 'Seconds/page must adapt after resizing');
+    await host.locator('#reader-scroll').dispatchEvent('wheel');
+    await page.setViewportSize({ width: 390, height: 844 });
     await auto.click();
     await host.locator('#reader-scroll').focus();
     await page.keyboard.press('ArrowDown');
@@ -169,7 +205,9 @@ try {
     await host.locator('#reader-start').click();
     assert.equal(await host.locator('#reader-width').inputValue(), '700');
     assert.equal(await host.locator('#reader-auto-mode').inputValue(), 'smooth');
-    assert.equal(await host.locator('#reader-auto-speed').inputValue(), '120');
+    assert.equal(await host.locator('#reader-auto-speed').inputValue(), '40');
+    assert.equal(await host.locator('#reader-auto-speed-unit').inputValue(), 'seconds');
+    assert.equal(await host.locator('#reader-auto-page-seconds').inputValue(), '3');
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     await context.close();
   }
@@ -301,5 +339,5 @@ try {
     await context.close();
   }
   assert.deepEqual(errors, []);
-  console.log('Reader browser passed: EH/EX, whole-page and smooth auto paging, pause/resume, saved settings, end stop, waiting for failed images with no preloading, narrow viewport, loading window, retry, native restoration and request reuse.');
+  console.log('Reader browser passed: EH/EX, whole-page and smooth auto paging, per-frame fractional motion, pixel/second and second/page speed including resize, pause/resume, saved settings, end stop, failed images with no preloading, narrow viewport, retry and native restoration.');
 } finally { await browser.close(); }

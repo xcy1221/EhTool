@@ -1,7 +1,7 @@
 const STORE = 'eh-search-tool:v1';
 const SITE_THEME = location.hostname === 'exhentai.org' ? 'dark' : 'light';
 const UI_STORE = 'eh-search-tool:ui:v1';
-const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, gap: 8, autoMode: 'page', autoInterval: 5, autoSpeed: 40 });
+const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, gap: 8, autoMode: 'page', autoInterval: 5, autoSpeed: 40, autoSpeedUnit: 'pixels', autoPageSeconds: 20 });
 
 function readStore(key, fallback) {
   try {
@@ -41,6 +41,8 @@ function readUI() {
       autoMode: ['page', 'smooth'].includes(reader?.autoMode) ? reader.autoMode : READER_DEFAULTS.autoMode,
       autoInterval: boundedNumber(reader?.autoInterval, READER_DEFAULTS.autoInterval, 1, 300),
       autoSpeed: boundedNumber(reader?.autoSpeed, READER_DEFAULTS.autoSpeed, 10, 1000),
+      autoSpeedUnit: ['pixels', 'seconds'].includes(reader?.autoSpeedUnit) ? reader.autoSpeedUnit : READER_DEFAULTS.autoSpeedUnit,
+      autoPageSeconds: boundedNumber(reader?.autoPageSeconds, READER_DEFAULTS.autoPageSeconds, 1, 300),
     },
   };
 }
