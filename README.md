@@ -103,3 +103,8 @@ npm run test:reader-browser
 - [Tampermonkey API 与更新元数据](https://www.tampermonkey.net/documentation.php?locale=zh_&q=update_url)
 - [原站搜索语法](https://ehwiki.org/wiki/Gallery_Searching)
 - 远程词库归 EhTagTranslation 编辑者所有，遵循 [CC BY-NC-SA 3.0 及其附加条款](https://github.com/EhTagTranslation/Database/blob/master/LICENSE.md)。仓库不包含完整词库。
+
+## 版本与维护状态
+
+- 当前项目版本统一索引见 [VERSION](VERSION)，与 `package.json` 保持一致；沿用现有构建和发布流程。
+- 是否仍在维护以 [STATUS.md](STATUS.md) 的 `maintenance_status` 为准；维护结论变化时同步该文件及本节。
