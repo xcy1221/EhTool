@@ -152,6 +152,38 @@ test('pagehide cancels reading and a cached page restore can resume cleanly', as
   } finally { app.close(); }
 });
 
+test('auto paging settings validate, persist and never resume without a user action', () => {
+  const app = open(1, { reader: { autoMode: 'invalid', autoInterval: 0, autoSpeed: -1 } });
+  const field = id => app.root.getElementById(id);
+  function change(id, value) { field(id).value = value; field(id).dispatchEvent(new app.window.Event('change')); }
+  try {
+    assert.equal(field('reader-auto-mode').value, 'page');
+    assert.equal(field('reader-auto-interval').value, '5');
+    assert.equal(field('reader-auto-speed').value, '40');
+    change('reader-auto-mode', 'smooth'); change('reader-auto-interval', '2'); change('reader-auto-speed', '150');
+    change('reader-auto-interval', '301'); change('reader-auto-speed', '');
+    assert.equal(field('reader-auto-interval').value, '2');
+    assert.equal(field('reader-auto-speed').value, '150');
+    assert.equal(field('reader-auto-interval-label').hidden, true);
+    assert.equal(field('reader-auto-speed-label').hidden, false);
+    field('reader-auto-toggle').click();
+    assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'true');
+    Object.defineProperty(app.window.document, 'hidden', { value: true, configurable: true });
+    app.window.document.dispatchEvent(new app.window.Event('visibilitychange'));
+    assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'false');
+    field('reader-auto-toggle').click();
+    field('reader-close').click(); field('reader-start').click();
+    assert.equal(field('reader-auto-mode').value, 'smooth');
+    assert.equal(field('reader-auto-speed').value, '150');
+    assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'false');
+    assert.equal(app.store.has('eh-search-tool:v1'), false);
+    field('reader-auto-toggle').click();
+    app.window.dispatchEvent(new app.window.Event('pagehide'));
+    app.window.dispatchEvent(new app.window.PageTransitionEvent('pageshow', { persisted: true }));
+    assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'false');
+  } finally { app.close(); }
+});
+
 test('the initial loaded or pending image is reused without cancelling or restarting its request', async () => {
   for (const pending of [false,true]) {
     const app=open(1,{reader:{ahead:0,behind:0}},null,window=>{

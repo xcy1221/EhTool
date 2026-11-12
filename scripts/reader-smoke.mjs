@@ -10,12 +10,12 @@ const browser = await chromium.launch({ headless: true, ...(existsSync(edge) ? {
 const errors = [];
 function source(index, origin) { return origin + '/s/token' + index + '/123-' + index; }
 function dimensions(index) { return index === 10 ? [600, 1600] : [800, 1200]; }
-function html(index, origin, broken = false) {
+function html(index, origin, broken = false, total = 22) {
   const [width, height] = dimensions(index);
   return '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>阅读模拟</title>' +
-    '<div id="i2"><div class="sn"><span>' + index + '</span> / <span>22</span></div></div>' +
+    '<div id="i2"><div class="sn"><span>' + index + '</span> / <span>' + total + '</span></div></div>' +
     (index > 1 ? '<a id="prev" href="' + source(index - 1, origin) + '">Prev</a>' : '') +
-    (index < 22 ? '<a id="next" href="' + source(index + 1, origin) + '">Next</a>' : '') +
+    (index < total ? '<a id="next" href="' + source(index + 1, origin) + '">Next</a>' : '') +
     '<a href="/g/123/abcdef/">Gallery</a><img id="img" width="' + width + '" height="' + height + '" src="https://reader-images.invalid/' + (broken ? 'broken' : index) + '.svg">' +
     '<script>document.addEventListener("keydown",e=>{if(["ArrowDown"," ","d"].includes(e.key)) window.nativeKeyEvents=(window.nativeKeyEvents||0)+1;});</script>';
 }
@@ -89,11 +89,11 @@ try {
     const top = await host.locator('[data-page="7"]').evaluate(el => el.getBoundingClientRect().top);
     assert.ok(Math.abs(top - await host.locator('#reader-scroll').evaluate(el => el.getBoundingClientRect().top)) < 2, 'Reversing and prepending moved the visible image');
     await host.locator('#reader-theme').click();
-    await host.locator('summary').click();
+    await host.locator('[data-section="reader-settings"] > summary').click();
     await host.locator('#reader-width').fill('700'); await host.locator('#reader-width').press('Tab');
     await page.waitForTimeout(60);
     assert.equal(Math.round((await host.locator('[data-page="7"]').boundingBox()).width), 700);
-    await host.locator('summary').click();
+    await host.locator('[data-section="reader-settings"] > summary').click();
     await page.screenshot({ path: 'test-results/reader-' + (origin.includes('exhentai') ? 'ex' : 'eh') + '.png' });
     // A narrow split pane uses the same viewport behavior as mobile.
     const beforeResize = await host.locator('#reader-progress').textContent();
@@ -115,6 +115,38 @@ try {
     assert.equal(windowCheck.boundsFirst, Math.max(1, windowCheck.first-(windowCheck.direction==='down'?3:5)));
     assert.equal(windowCheck.boundsLast, Math.min(22, windowCheck.last+(windowCheck.direction==='down'?5:3)));
     await page.screenshot({ path: 'test-results/reader-mobile.png' });
+    const auto = host.locator('#reader-auto-toggle');
+    const autoSettings = host.locator('[data-section="reader-auto-settings"]');
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
+    await autoSettings.locator('summary').click();
+    await host.locator('#reader-auto-interval').fill('1');
+    await host.locator('#reader-auto-interval').press('Tab');
+    const pageStart = await host.locator('#reader-scroll').evaluate(el => el.scrollTop);
+    const screenHeight = await host.locator('#reader-scroll').evaluate(el => el.clientHeight);
+    await auto.click();
+    await page.waitForFunction(start => document.querySelector('#eh-continuous-reader').shadowRoot.getElementById('reader-scroll').scrollTop > start + 10, pageStart);
+    await auto.click();
+    assert.ok(Math.abs(await host.locator('#reader-scroll').evaluate(el => el.scrollTop) - pageStart - screenHeight) < 2, 'Whole-page mode must advance one screen');
+    await host.locator('#reader-auto-mode').selectOption('smooth');
+    await host.locator('#reader-auto-speed').fill('120');
+    await host.locator('#reader-auto-speed').press('Tab');
+    await page.screenshot({ path: 'test-results/reader-auto-settings.png' });
+    const autoBox = await autoSettings.locator('.reader-settings').boundingBox();
+    assert.ok(autoBox.x >= 0 && autoBox.x + autoBox.width <= 390 && autoBox.y + autoBox.height <= 844);
+    await autoSettings.locator('summary').click();
+    const smoothStart = await host.locator('#reader-scroll').evaluate(el => el.scrollTop);
+    await auto.click();
+    await page.waitForFunction(start => document.querySelector('#eh-continuous-reader').shadowRoot.getElementById('reader-scroll').scrollTop > start + 5, smoothStart);
+    assert.ok(await host.locator('#reader-scroll').evaluate(el => el.scrollTop) - smoothStart < 100, 'Smooth mode must advance gradually');
+    await host.locator('#reader-scroll').dispatchEvent('wheel');
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
+    const pausedTop = await host.locator('#reader-scroll').evaluate(el => el.scrollTop);
+    await page.waitForTimeout(150);
+    assert.equal(await host.locator('#reader-scroll').evaluate(el => el.scrollTop), pausedTop);
+    await auto.click();
+    await host.locator('#reader-scroll').focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     await host.locator('#reader-scroll').evaluate(scroll => { scroll.scrollTop=0; });
     await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.querySelector('[data-page="1"]')?.dataset.state==='loaded');
     await host.locator('#reader-scroll').focus();
@@ -126,6 +158,8 @@ try {
     await page.keyboard.press('End');
     await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.querySelector('[data-page="22"]')?.dataset.state==='loaded');
     assert.equal(await host.getAttribute('data-last'),'22');
+    await auto.click();
+    await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.getElementById('reader-auto-toggle').getAttribute('aria-pressed') === 'false');
     assert.ok(metadata.every(index=>index>=1&&index<=22), 'Requested past a gallery boundary');
     await host.locator('#reader-close').click();
     const count = metadata.length;
@@ -134,7 +168,57 @@ try {
     assert.equal(await page.locator('#img').getAttribute('src'), 'https://reader-images.invalid/6.svg');
     await host.locator('#reader-start').click();
     assert.equal(await host.locator('#reader-width').inputValue(), '700');
+    assert.equal(await host.locator('#reader-auto-mode').inputValue(), 'smooth');
+    assert.equal(await host.locator('#reader-auto-speed').inputValue(), '120');
+    assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     await context.close();
+  }
+
+  // No manual preloading: wait at an unloaded/failed image, then continue after retry.
+  {
+    const context = await browser.newContext({ viewport: { width: 800, height: 600 } });
+    await context.addInitScript(() => localStorage.setItem('eh-search-tool:ui:v1', JSON.stringify({ reader: { ahead: 0, behind: 0, imageRetries: 0, autoMode: 'smooth', autoSpeed: 1000 } })));
+    const page = await context.newPage(), origin = 'https://e-hentai.org';
+    page.setDefaultTimeout(10000);
+    page.on('pageerror', error => errors.push(error.message));
+    const requests = [];
+    let release, secondAttempts = 0;
+    const held = new Promise(resolve => { release = resolve; });
+    await context.route(origin + '/s/**', route => {
+      const index = Number(new URL(route.request().url()).pathname.split('-').at(-1));
+      requests.push(index);
+      return route.fulfill({ contentType: 'text/html', body: html(index, origin, false, 3) });
+    });
+    await context.route('https://reader-images.invalid/**', async route => {
+      if (route.request().url().endsWith('/2.svg') && secondAttempts++ === 0) {
+        await held; await route.fulfill({ status: 503 }); return;
+      }
+      await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200"><rect width="100%" height="100%" fill="#dae7d4"/></svg>' });
+    });
+    try {
+      await page.goto(source(1, origin)); await page.addScriptTag({ content: script });
+      const host = page.locator('#eh-continuous-reader'), scroll = host.locator('#reader-scroll'), auto = host.locator('#reader-auto-toggle');
+      await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.querySelector('[data-page="1"]')?.dataset.state === 'loaded');
+      assert.deepEqual(requests, [1]);
+      await auto.click();
+      await page.waitForFunction(() => {
+        const root = document.querySelector('#eh-continuous-reader').shadowRoot;
+        return Math.abs(root.querySelector('[data-page="1"]').getBoundingClientRect().bottom - root.getElementById('reader-scroll').getBoundingClientRect().bottom) < 2;
+      });
+      const waitingTop = await scroll.evaluate(el => el.scrollTop);
+      await page.waitForTimeout(150);
+      assert.equal(await scroll.evaluate(el => el.scrollTop), waitingTop, 'Must wait for the next image');
+      release();
+      await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.querySelector('[data-page="2"]')?.dataset.state === 'error');
+      await page.waitForTimeout(150);
+      assert.equal(await scroll.evaluate(el => el.scrollTop), waitingTop, 'Must not skip a failed image');
+      assert.equal(await auto.getAttribute('aria-pressed'), 'true');
+      await host.locator('[data-page="2"] button').evaluate(button => button.click());
+      await page.waitForFunction(top => document.querySelector('#eh-continuous-reader').shadowRoot.getElementById('reader-scroll').scrollTop > top + 10, waitingTop);
+      await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.getElementById('reader-auto-toggle').getAttribute('aria-pressed') === 'false');
+      assert.ok(await host.locator('[data-page="3"][data-state="loaded"]').count());
+      assert.ok(requests.every(index => index >= 1 && index <= 3));
+    } finally { release(); await context.close(); }
   }
 
   for(const mode of ['loaded','pending','automatic','manual','configured']) {
@@ -195,13 +279,13 @@ try {
       assert.ok(retryTimes[0]-waitingAt>=900);assert.ok(retryTimes[1]-retryTimes[0]>=950);
       assert.equal(new URL(pageRequests[2]).searchParams.get('nl'),'source-2');
       assert.deepEqual(imageRequests,['https://reader-images.invalid/original.svg','https://reader-images.invalid/healthy.svg','https://reader-images.invalid/backup.svg']);
-      await host.locator('summary').click();
+      await host.locator('[data-section="reader-settings"] > summary').click();
       assert.equal(await host.locator('#reader-retries').inputValue(),'2');assert.equal(await host.locator('#reader-retry-interval').inputValue(),'1');
       await host.locator('#reader-retries').fill('4');await host.locator('#reader-retries').press('Tab');
       await host.locator('#reader-retry-interval').fill('2');await host.locator('#reader-retry-interval').press('Tab');
       await page.setViewportSize({width:390,height:844});
       await page.screenshot({path:'test-results/retry-settings.png'});
-      const box=await host.locator('.reader-settings').boundingBox();assert.ok(box.x>=0&&box.x+box.width<=390&&box.y+box.height<=844);
+      const box=await host.locator('[data-section="reader-settings"] .reader-settings').boundingBox();assert.ok(box.x>=0&&box.x+box.width<=390&&box.y+box.height<=844);
     }else{
       assert.equal(pageRequests.length,2);
       assert.equal(new URL(pageRequests[1]).searchParams.get('nl'),'source-1');
@@ -217,5 +301,5 @@ try {
     await context.close();
   }
   assert.deepEqual(errors, []);
-  console.log('Reader browser passed: EH/EX themes, 5/3 window, ordered scrolling, cancellation, retry, stable placeholders, keyboard, split-sized viewport, persistence, native restoration, first-image request reuse and recovery from connection-closed errors, configurable retry counts and one-second intervals.');
+  console.log('Reader browser passed: EH/EX, whole-page and smooth auto paging, pause/resume, saved settings, end stop, waiting for failed images with no preloading, narrow viewport, loading window, retry, native restoration and request reuse.');
 } finally { await browser.close(); }

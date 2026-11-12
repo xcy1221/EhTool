@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eh工具
 // @namespace    https://github.com/xcy1221/EhTool
-// @version      0.5.5
+// @version      0.5.6
 // @description  左侧浮动eh工具：标签组合与搜索、画廊悬停标签、评论区收起、明暗配色、画廊连续阅读
 // @match        https://e-hentai.org/*
 // @match        https://exhentai.org/*
@@ -122,7 +122,7 @@ function searchTags(tags, query, namespace = '', favorites = [], view = 'all', r
 const STORE = 'eh-search-tool:v1';
 const SITE_THEME = location.hostname === 'exhentai.org' ? 'dark' : 'light';
 const UI_STORE = 'eh-search-tool:ui:v1';
-const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, gap: 8 });
+const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, gap: 8, autoMode: 'page', autoInterval: 5, autoSpeed: 40 });
 
 function readStore(key, fallback) {
   try {
@@ -159,6 +159,9 @@ function readUI() {
       retryInterval: boundedNumber(reader?.retryInterval, READER_DEFAULTS.retryInterval, 0, 300),
       maxWidth: boundedNumber(reader?.maxWidth, READER_DEFAULTS.maxWidth, 320, 2400),
       gap: boundedNumber(reader?.gap, READER_DEFAULTS.gap, 0, 40),
+      autoMode: ['page', 'smooth'].includes(reader?.autoMode) ? reader.autoMode : READER_DEFAULTS.autoMode,
+      autoInterval: boundedNumber(reader?.autoInterval, READER_DEFAULTS.autoInterval, 1, 300),
+      autoSpeed: boundedNumber(reader?.autoSpeed, READER_DEFAULTS.autoSpeed, 10, 1000),
     },
   };
 }
@@ -494,6 +497,8 @@ function setupContinuousReader() {
     host.classList.remove('inactive');
     root.innerHTML = '<style>' + READER_STYLE + '</style>' +
       '<header><strong>连续阅读</strong><span id="reader-progress" role="status"></span><a id="reader-gallery">画廊</a><button id="reader-theme"></button>' +
+      '<button id="reader-auto-toggle" aria-pressed="false">自动翻页</button>' +
+      '<details data-section="reader-auto-settings"><summary>翻页设置</summary><div class="reader-settings"><label>翻页方式<select id="reader-auto-mode"><option value="page">整页翻页</option><option value="smooth">平滑翻页</option></select></label><label id="reader-auto-interval-label">翻页间隔（秒）<input id="reader-auto-interval" type="number" min="1" max="300"></label><label id="reader-auto-speed-label">速度（像素/秒）<input id="reader-auto-speed" type="number" min="10" max="1000"></label><p class="reader-hint">整页每次向下翻一屏；平滑连续向下滚动。等待图片加载，到末尾停止；手动操作或切到后台会暂停。</p></div></details>' +
       '<details data-section="reader-settings"><summary>设置</summary><div class="reader-settings"><label>沿方向预加载<input id="reader-ahead" type="number" min="0" max="20"></label><label>反方向保留<input id="reader-behind" type="number" min="0" max="20"></label><label>最大宽度<input id="reader-width" type="number" min="320" max="2400" step="10"></label><label>图片间距<input id="reader-gap" type="number" min="0" max="40"></label><label>自动重试次数<input id="reader-retries" type="number" min="0" max="20"></label><label>重试间隔（秒）<input id="reader-retry-interval" type="number" min="0" max="300"></label><p class="reader-hint">0 次关闭自动重试；手动重试立即执行。</p><p id="reader-status" role="status"></p></div></details>' +
       '<button id="reader-close">返回原页</button></header><main id="reader-scroll" tabindex="0" aria-label="纵向连续阅读"><div id="reader-pages"></div></main>';
     const $ = id => root.getElementById(id);
@@ -505,6 +510,7 @@ function setupContinuousReader() {
     let config = readUI().reader;
     let nativeTaken = false, restoring = false;
     let active = true, direction = 1, lastTop = 0, frame = 0, total = initial.total;
+    let autoRunning = false, autoFrame = 0, autoLast = null, autoElapsed = 0, autoDistance = 0;
     let bounds = readerBounds(initial.index, initial.index, direction, config, total);
     const records = new Map(), tasks = new Map();
     let viewAnchor = null, viewWidth = scroll.clientWidth;
@@ -692,7 +698,8 @@ function setupContinuousReader() {
       const anchorRect = records.get(range.first)?.element.getBoundingClientRect();
       if (anchorRect?.height) viewAnchor = { index: range.first, fraction: (scroll.getBoundingClientRect().top - anchorRect.top) / anchorRect.height };
       viewWidth = scroll.clientWidth;
-      bounds = readerBounds(range.first, range.last, direction, config, total);
+      // Automatic reading needs a next image even when manual preloading is disabled.
+      bounds = readerBounds(range.first, range.last, direction, autoRunning ? { ...config, ahead: Math.max(1, config.ahead) } : config, total);
       host.dataset.direction = direction > 0 ? 'down' : 'up';
       host.dataset.first = bounds.first; host.dataset.last = bounds.last;
       $('reader-progress').textContent = '第 ' + range.first + ' 张' + (total ? ' / ' + total : '');
@@ -714,6 +721,60 @@ function setupContinuousReader() {
       }
     }
     function schedule() { if (active && !frame) frame = requestAnimationFrame(reconcile); }
+    function resetAutoClock() { autoLast = null; autoElapsed = 0; autoDistance = 0; }
+    function pauseAuto(message = '') {
+      autoRunning = false; cancelAnimationFrame(autoFrame); autoFrame = 0;
+      resetAutoClock();
+      $('reader-auto-toggle').textContent = '自动翻页';
+      $('reader-auto-toggle').setAttribute('aria-pressed', 'false');
+      if (message) $('reader-status').textContent = message;
+      schedule();
+    }
+    function autoTick(timestamp) {
+      autoFrame = 0;
+      if (!active || !autoRunning) return;
+      const elapsed = autoLast === null ? 0 : Math.min(100, timestamp - autoLast);
+      autoLast = timestamp;
+      const pages = [...records.values()].filter(record => inside(record.index)).sort((a, b) => a.index - b.index), last = pages.at(-1);
+      const remaining = Math.max(0, scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop);
+      if (remaining <= 1 && last?.element.dataset.state === 'loaded' && !last.info.next) {
+        pauseAuto('已到最后一张，自动翻页已停止。'); return;
+      }
+      const viewport = scroll.getBoundingClientRect();
+      let readyBottom = viewport.top;
+      for (const record of pages) {
+        const rect = record.element.getBoundingClientRect();
+        if (rect.bottom <= viewport.top + 1) continue;
+        if (record.element.dataset.state !== 'loaded') break;
+        readyBottom = rect.bottom;
+        if (record === last && !record.info.next) readyBottom = viewport.bottom + remaining;
+      }
+      // Do not scroll an unloaded image or an error placeholder past the reader.
+      const available = Math.min(remaining, Math.max(0, readyBottom - viewport.bottom));
+      if (available >= 1) {
+        if (config.autoMode === 'page') {
+          autoElapsed += elapsed;
+          if (autoElapsed >= config.autoInterval * 1000) {
+            scroll.scrollTop += Math.min(scroll.clientHeight, available); autoElapsed = 0;
+          }
+        } else {
+          autoDistance += config.autoSpeed * elapsed / 1000;
+          const amount = Math.min(Math.floor(autoDistance), available);
+          if (amount >= 1) { scroll.scrollTop += amount; autoDistance -= amount; }
+        }
+      } else { autoElapsed = 0; autoDistance = 0; schedule(); }
+      autoFrame = requestAnimationFrame(autoTick);
+    }
+    function onManualScroll() { if (autoRunning) pauseAuto('自动翻页已暂停。'); }
+    function onVisibility() { if (document.hidden && autoRunning) pauseAuto('页面已隐藏，自动翻页已暂停。'); }
+    $('reader-auto-toggle').addEventListener('click', () => {
+      if (autoRunning) { pauseAuto(); return; }
+      autoRunning = true; direction = 1; resetAutoClock();
+      $('reader-auto-toggle').textContent = '暂停翻页';
+      $('reader-auto-toggle').setAttribute('aria-pressed', 'true');
+      $('reader-status').textContent = '自动翻页已开始。';
+      schedule(); autoFrame = requestAnimationFrame(autoTick);
+    });
     function onScroll() {
       const delta = scroll.scrollTop - lastTop;
       if (Math.abs(delta) > 1) direction = delta > 0 ? 1 : -1;
@@ -740,6 +801,7 @@ function setupContinuousReader() {
       } else if (key === 'escape') { stop(); launcher(); }
       else return;
       event.preventDefault(); event.stopImmediatePropagation();
+      onManualScroll();
       if (amount) scroll.scrollBy({ top: amount, behavior: 'auto' });
     }
     function applyConfig() {
@@ -747,6 +809,7 @@ function setupContinuousReader() {
       schedule();
     }
     function onResize() {
+      resetAutoClock();
       const saved = viewAnchor, widthChanged = scroll.clientWidth !== viewWidth;
       applyConfig();
       const page = saved && records.get(saved.index)?.element;
@@ -757,14 +820,30 @@ function setupContinuousReader() {
       }
       viewWidth = scroll.clientWidth;
     }
-    for (const [id, key, min, max] of [['reader-ahead', 'ahead', 0, 20], ['reader-behind', 'behind', 0, 20], ['reader-width', 'maxWidth', 320, 2400], ['reader-gap', 'gap', 0, 40], ['reader-retries', 'imageRetries', 0, 20], ['reader-retry-interval', 'retryInterval', 0, 300]]) {
+    function showAutoMode() {
+      $('reader-auto-mode').value = config.autoMode;
+      $('reader-auto-interval-label').hidden = config.autoMode !== 'page';
+      $('reader-auto-speed-label').hidden = config.autoMode !== 'smooth';
+      resetAutoClock();
+    }
+    showAutoMode();
+    $('reader-auto-mode').addEventListener('change', () => {
+      const value = $('reader-auto-mode').value;
+      if (!['page', 'smooth'].includes(value)) { showAutoMode(); return; }
+      try {
+        updateUI({ reader: { autoMode: value } }); config = readUI().reader; showAutoMode();
+        $('reader-status').textContent = '已保存并应用。';
+      } catch { showAutoMode(); $('reader-status').textContent = '无法保存阅读设置。'; }
+    });
+    for (const [id, key, min, max] of [['reader-ahead', 'ahead', 0, 20], ['reader-behind', 'behind', 0, 20], ['reader-width', 'maxWidth', 320, 2400], ['reader-gap', 'gap', 0, 40], ['reader-retries', 'imageRetries', 0, 20], ['reader-retry-interval', 'retryInterval', 0, 300], ['reader-auto-interval', 'autoInterval', 1, 300], ['reader-auto-speed', 'autoSpeed', 10, 1000]]) {
       $(id).value = config[key];
       $(id).addEventListener('change', () => {
         const value = Number($(id).value);
         if ($(id).value === '' || !Number.isInteger(value) || value < min || value > max) { $(id).value = config[key]; $('reader-status').textContent = '请输入 ' + min + '–' + max + ' 的整数。'; return; }
         try {
           updateUI({ reader: { [key]: value } }); config = readUI().reader;
-          if (key === 'imageRetries' || key === 'retryInterval') applyRetryConfig(); else applyConfig();
+          if (key === 'autoInterval' || key === 'autoSpeed') resetAutoClock();
+          else if (key === 'imageRetries' || key === 'retryInterval') applyRetryConfig(); else applyConfig();
           $('reader-status').textContent = '已保存并应用。';
         }
         catch { $('reader-status').textContent = '无法保存阅读设置。'; }
@@ -773,11 +852,14 @@ function setupContinuousReader() {
     stop = () => {
       if (!active) return;
       restoring = true; active = false; cancelAnimationFrame(frame);
+      pauseAuto();
       for (const task of tasks.values()) task.cancel();
       tasks.clear();
       for (const record of records.values()) { clearRetry(record); release(record); }
       records.clear();
       scroll.removeEventListener('scroll', onScroll);
+      for (const event of ['wheel', 'touchstart', 'pointerdown']) scroll.removeEventListener(event, onManualScroll);
+      document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('resize', onResize);
       window.removeEventListener('keydown', onKey, true);
       resizeObserver?.disconnect();
@@ -786,6 +868,8 @@ function setupContinuousReader() {
     };
     $('reader-close').addEventListener('click', () => { stop(); launcher(); });
     scroll.addEventListener('scroll', onScroll, { passive: true });
+    for (const event of ['wheel', 'touchstart', 'pointerdown']) scroll.addEventListener(event, onManualScroll, { passive: true });
+    document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
     window.addEventListener('keydown', onKey, true);
     const resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null;
@@ -846,7 +930,7 @@ function setupGalleryComments() {
 }
 
 const STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; left:12px; top:72px; width:540px; max-width:calc(100vw - 24px); z-index:2147482000; display:block; color:var(--text); font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; pointer-events:none; }\n* { box-sizing:border-box; }\n[hidden] { display:none !important; }\nsection { display:flex; flex-direction:column; max-height:calc(100vh - 88px); max-height:calc(100dvh - 88px); background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; pointer-events:auto; }\nheader { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:var(--subtle); border-bottom:1px solid var(--border); flex-shrink:0; }\nh2 { font-size:19px; margin:0; font-weight:650; }\nh3 { font-size:13px; margin:0; } h3 span { color:var(--muted); margin-left:5px; }\n#body { padding:14px 16px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; min-height:0; }\nbutton, input, select, textarea { font:inherit; }\nbutton, .file-button { color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; cursor:pointer; line-height:1.4; }\nbutton:hover, .file-button:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:disabled { opacity:.5; cursor:default; }\nbutton:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, .file-button:focus-within { outline:2px solid var(--accent); outline-offset:2px; }\ninput:not([type=checkbox]):not([type=file]), select, textarea { width:100%; min-width:0; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; min-height:34px; }\ninput[type=checkbox] { accent-color:var(--accent); }\nlabel { display:block; min-width:0; font-size:11px; color:var(--muted); } label input, label select { margin-top:4px; }\n.block-title { margin-bottom:9px; } .native-filters { display:flex; align-items:end; gap:10px; margin-bottom:18px; }\nfieldset { border:0; padding:0; margin:0; min-width:0; flex:1; } legend { padding:0; font-size:11px; color:var(--muted); }\n.native-filters > label { width:84px; flex-shrink:0; } .range { display:flex; align-items:center; gap:5px; } .range label { flex:1; font-size:0; } .range input { font-size:12px; } .range span { color:var(--muted); padding-top:4px; }\n.toolbar { display:flex; gap:8px; align-items:end; } .grow { flex:1; min-width:0; } .toolbar > label:not(.grow) { width:100px; }\n.tabs { display:flex; gap:6px; margin:0 0 10px; } .tabs button { flex:1; font-size:12px; padding:7px; }\n.tabs button[aria-pressed=true] { color:var(--accent); background:var(--hover); border-color:var(--accent-hover); font-weight:600; }\n.exact { display:flex; align-items:center; gap:6px; margin-top:10px; } .exact input { margin:0; }\n.list-meta, .query-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:10px; margin:10px 0 6px; }\n.tag-purpose { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:10px; font-size:11px; color:var(--muted); }\n.tag-purpose button { font-size:11px; padding:5px 9px; }\n[data-add-mode=include] { color:var(--include); border-color:var(--include-border); }\n[data-add-mode=exclude] { color:var(--exclude); border-color:var(--exclude-border); }\n[data-add-mode=or] { color:var(--or); border-color:var(--or-border); }\n[data-add-mode=include][aria-pressed=true] { background:var(--include-solid); color:var(--on-accent); border-color:var(--include-solid); }\n[data-add-mode=exclude][aria-pressed=true] { background:var(--exclude-solid); color:var(--on-accent); border-color:var(--exclude-solid); }\n[data-add-mode=or][aria-pressed=true] { background:var(--or); color:var(--on-accent); border-color:var(--or); }\n#results { display:flex; flex-wrap:wrap; align-content:flex-start; gap:6px; max-height:190px; overflow-y:auto; scrollbar-width:thin; padding:2px; }\n.tag-row { border:1px solid var(--border); border-radius:6px; min-width:0; max-width:100%; padding:5px 10px; background:var(--surface); font-size:12px; overflow-wrap:anywhere; }\n.tag-row.include { border-color:var(--include-border); color:var(--include); background:var(--include-bg); }\n.tag-row.exclude { border-color:var(--exclude-border); color:var(--exclude); background:var(--exclude-bg); }\n.tag-row.or { border-color:var(--or-border); color:var(--or); background:var(--or-bg); }\n.more { text-align:center; } .more button { margin-top:6px; padding:3px 10px; font-size:11px; }\n.selection-title { display:flex; align-items:center; justify-content:space-between; margin-top:15px; border-top:1px solid var(--border); padding-top:12px; }\n.selection-title button { padding:3px 7px; font-size:10px; }\n#selected { margin-top:8px; } .selected-group { border-left:3px solid var(--include-border); background:var(--include-bg); border-radius:4px; padding:8px; margin-top:6px; }\n.selected-group > strong { color:var(--include); font-size:12px; } .selected-group .hint { margin:2px 0 5px; font-size:10px; }\n.selected-group.exclude { border-color:var(--exclude-border); background:var(--exclude-bg); } .selected-group.exclude > strong { color:var(--exclude); }\n.selected-group.or { border-color:var(--or-border); background:var(--or-bg); } .selected-group.or > strong { color:var(--or); }\n.chip { display:flex; align-items:center; gap:4px; margin-top:4px; min-width:0; background:var(--surface); border-radius:4px; padding:4px 5px; }\n.selected-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }\n.chip button { padding:3px 5px; font-size:10px; border-color:transparent; background:transparent; flex-shrink:0; }\n.chip .to-include { color:var(--include); } .chip .to-exclude { color:var(--exclude); } .chip .to-or { color:var(--or); }\n.keywords { margin-top:12px; }\n#query { font:11px/1.6 ui-monospace,Consolas,monospace; background:var(--subtle); resize:vertical; min-height:54px; }\n.small-actions { display:flex; gap:7px; margin-top:8px; } .small-actions button { font-size:11px; padding:5px 7px; }\nfooter { padding:11px 16px; border-top:1px solid var(--border); background:var(--subtle); flex-shrink:0; }\n.search-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }\n.search-actions button { width:100%; }\nbutton.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; } button.primary:hover { background:var(--accent-hover); }\n.hint { font-size:10px; color:var(--muted); margin:4px 0; }\n.empty { color:var(--muted); font-size:11px; margin:8px 0; }\ndetails { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }\nsummary { cursor:pointer; color:var(--muted); font-size:11px; padding:3px 0; }\n.manual { display:flex; align-items:end; flex-wrap:wrap; gap:7px; margin-top:9px; } .manual .grow { flex-basis:100%; }\n.preset-row { display:flex; align-items:end; gap:7px; margin-top:9px; } .preset-row button { font-size:11px; }\n.preset { display:inline-flex; margin:7px 5px 0 0; } .preset button { padding:5px 7px; font-size:11px; }\n.dictionary { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .dictionary > div { width:100%; }\n.dictionary strong { font-size:11px; } .dictionary button, .file-button { font-size:11px; }\n.file-button { position:relative; overflow:hidden; } .file-button input { position:absolute; opacity:0; inset:0; width:100%; cursor:pointer; }\na { color:var(--include); font-size:10px; }\n#status { margin:5px 0 0; font-size:11px; color:var(--include); overflow-wrap:anywhere; }\n.error, #status.error { color:var(--exclude); }\n#launcher { pointer-events:auto; padding:10px 12px; background:var(--accent); color:var(--on-accent); border-color:var(--accent); box-shadow:0 4px 16px var(--shadow); }\n@media(max-width:600px) { :host { top:12px; } section { max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); } }\n\n.header-actions { display:flex; gap:6px; flex-shrink:0; }\n.block { margin:0 0 12px; border:1px solid var(--border); border-radius:7px; padding:0; }\n.block > summary { padding:9px 10px; color:var(--text); font-size:12px; font-weight:600; background:var(--subtle); border-radius:6px; }\n.block > summary span { color:var(--muted); font-size:11px; font-weight:400; margin-left:8px; }\n.block-content { padding:10px; }\n.block-content > details:first-child { margin-top:0; }\n.native-filters { margin-bottom:0; }\n.selection-title { margin-top:0; border:0; padding-top:0; }\n.reading-options { display:flex; gap:10px; margin-top:10px; }\n.reading-options label { flex:1; }\n@media(max-width:420px) { header { padding:10px; gap:6px; } header .hint { max-width:140px; } #body { padding:10px; } footer { padding:10px; } }\n\n#hover-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:10px; }\n#hover-groups legend { margin-bottom:4px; }\n#hover-delay { max-width:120px; }\n";
-const READER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; inset:0; z-index:2147481000; display:flex; flex-direction:column; background:var(--subtle); color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host(.inactive) { inset:auto auto 12px 12px; background:transparent; }\n* { box-sizing:border-box; } [hidden] { display:none !important; }\nheader { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }\n#reader-progress { flex:1; color:var(--muted); white-space:nowrap; }\nbutton, summary, input { font:inherit; }\nbutton, summary { border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--text); padding:5px 9px; cursor:pointer; }\nbutton:hover, summary:hover { background:var(--hover); }\nbutton:focus-visible, summary:focus-visible, input:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\na { color:var(--text); }\ndetails > summary { list-style:none; } details { position:relative; }\n.reader-settings { position:absolute; top:38px; right:0; width:270px; max-height:calc(100dvh - 64px); overflow-y:auto; max-width:calc(100vw - 24px); padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:7px; box-shadow:0 4px 20px var(--shadow); z-index:2; }\n.reader-settings label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; gap:8px; }\n.reader-settings input { width:80px; min-width:0; background:var(--subtle); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:4px; }\n#reader-status { color:var(--muted); margin:5px 0 0; font-size:12px; }\n#reader-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; outline:none; overflow-anchor:none; }\n#reader-pages { display:flex; flex-direction:column; align-items:center; padding:8px 0; min-height:100%; overflow-anchor:none; }\nfigure { position:relative; flex-shrink:0; max-width:100%; margin:0; background:var(--surface); overflow:hidden; overflow-anchor:none; }\nfigure > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }\nfigcaption { position:absolute; left:6px; top:6px; padding:2px 6px; border-radius:4px; color:var(--muted); background:var(--surface); font-size:11px; opacity:.8; z-index:1; pointer-events:none; }\n.placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--muted); text-align:center; }\n@media(max-width:480px) { header { padding:6px; gap:5px; } header strong { display:none; } button,summary { padding:5px 7px; font-size:12px; } .reader-settings { position:fixed; top:48px; right:8px; } }\n\n.reader-hint { color:var(--muted); font-size:12px; margin:8px 0; }\n";
+const READER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; inset:0; z-index:2147481000; display:flex; flex-direction:column; background:var(--subtle); color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host(.inactive) { inset:auto auto 12px 12px; background:transparent; }\n* { box-sizing:border-box; } [hidden] { display:none !important; }\nheader { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }\n#reader-progress { flex:1; color:var(--muted); white-space:nowrap; }\nbutton, summary, input, select { font:inherit; }\nbutton, summary { border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--text); padding:5px 9px; cursor:pointer; }\nbutton:hover, summary:hover { background:var(--hover); }\nbutton:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n#reader-auto-toggle[aria-pressed=\"true\"] { background:var(--hover); border-color:var(--accent); }\na { color:var(--text); }\ndetails > summary { list-style:none; } details { position:relative; }\n.reader-settings { position:absolute; top:38px; right:0; width:270px; max-height:calc(100dvh - 64px); overflow-y:auto; max-width:calc(100vw - 24px); padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:7px; box-shadow:0 4px 20px var(--shadow); z-index:2; }\n.reader-settings label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; gap:8px; }\n.reader-settings input, .reader-settings select { width:96px; min-width:0; background:var(--subtle); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:4px; }\n#reader-status { color:var(--muted); margin:5px 0 0; font-size:12px; }\n#reader-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; outline:none; overflow-anchor:none; }\n#reader-pages { display:flex; flex-direction:column; align-items:center; padding:8px 0; min-height:100%; overflow-anchor:none; }\nfigure { position:relative; flex-shrink:0; max-width:100%; margin:0; background:var(--surface); overflow:hidden; overflow-anchor:none; }\nfigure > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }\nfigcaption { position:absolute; left:6px; top:6px; padding:2px 6px; border-radius:4px; color:var(--muted); background:var(--surface); font-size:11px; opacity:.8; z-index:1; pointer-events:none; }\n.placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--muted); text-align:center; }\n@media(max-width:480px) { header { padding:6px; gap:5px; } header strong { display:none; } button,summary { padding:5px 7px; font-size:12px; } .reader-settings { position:fixed; top:48px; right:8px; } }\n\n.reader-hint { color:var(--muted); font-size:12px; margin:8px 0; }\n";
 const COMMENTS_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { display:block; margin:12px auto; max-width:100%; font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; }\ndiv { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; background:var(--subtle); color:var(--text); border:1px solid var(--border); border-radius:7px; }\nbutton { font:inherit; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 10px; cursor:pointer; }\nbutton:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n";
 const HOVER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; right:12px; top:72px; width:320px; max-width:calc(100vw - 24px); z-index:2147482001; color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host([hidden]) { display:none; }\n* { box-sizing:border-box; }\nsection { background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; }\nheader { display:flex; align-items:start; gap:8px; padding:12px; background:var(--subtle); border-bottom:1px solid var(--border); }\nh2 { flex:1; min-width:0; margin:0; font-size:14px; overflow-wrap:anywhere; }\nbutton { flex-shrink:0; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:5px; background:var(--surface); cursor:pointer; }\nbutton:hover { background:var(--hover); }\nbutton:focus-visible { outline:2px solid var(--accent); }\n#hover-content { padding:12px; overflow-y:auto; max-height:calc(100vh - 190px); max-height:calc(100dvh - 190px); scrollbar-width:thin; }\n.tag-group + .tag-group { margin-top:12px; }\nh3 { margin:0 0 5px; color:var(--muted); font-size:12px; }\n.tags { display:flex; flex-wrap:wrap; gap:5px; }\n.tag { padding:3px 7px; border:1px solid var(--border); border-radius:5px; background:var(--subtle); overflow-wrap:anywhere; max-width:100%; }\n@media(max-width:900px) { :host { top:auto; bottom:12px; } #hover-content { max-height:35vh; max-height:35dvh; } }\n";
 const DICTIONARY = 'eh-search-tool:dictionary:v1';
