@@ -91,8 +91,8 @@ function setupContinuousReader() {
     root.innerHTML = '<style>' + READER_STYLE + '</style>' +
       '<header><strong>连续阅读</strong><span id="reader-progress" role="status"></span><a id="reader-gallery">画廊</a><button id="reader-theme"></button>' +
       '<button id="reader-auto-toggle" aria-pressed="false">自动翻页</button>' +
-      '<details data-section="reader-auto-settings"><summary>翻页设置</summary><div class="reader-settings"><label>翻页方式<select id="reader-auto-mode"><option value="page">整页翻页</option><option value="smooth">平滑翻页</option></select></label><label id="reader-auto-interval-label">翻页间隔（秒）<input id="reader-auto-interval" type="number" min="1" max="300"></label><label id="reader-auto-speed-unit-label">速度单位<select id="reader-auto-speed-unit"><option value="pixels">像素/秒</option><option value="seconds">秒/页</option></select></label><label id="reader-auto-speed-label">速度（像素/秒）<input id="reader-auto-speed" type="number" min="10" max="1000"></label><label id="reader-auto-page-seconds-label">速度（秒/页）<input id="reader-auto-page-seconds" type="number" min="1" max="300"></label><p class="reader-hint">1 页按阅读区一屏计算。整页定时翻屏，平滑连续滚动。等待图片加载，到末尾停止；手动操作或切到后台暂停。</p></div></details>' +
-      '<details data-section="reader-settings"><summary>设置</summary><div class="reader-settings"><label>沿方向预加载<input id="reader-ahead" type="number" min="0" max="20"></label><label>反方向保留<input id="reader-behind" type="number" min="0" max="20"></label><label>最大宽度<input id="reader-width" type="number" min="320" max="2400" step="10"></label><label>图片间距<input id="reader-gap" type="number" min="0" max="40"></label><label>自动重试次数<input id="reader-retries" type="number" min="0" max="20"></label><label>重试间隔（秒）<input id="reader-retry-interval" type="number" min="0" max="300"></label><p class="reader-hint">0 次关闭自动重试；手动重试立即执行。</p><p id="reader-status" role="status"></p></div></details>' +
+      '<details data-section="reader-auto-settings"><summary>翻页设置</summary><div class="reader-settings"><label>翻页方式<select id="reader-auto-mode"><option value="page">整页翻页</option><option value="smooth">平滑翻页</option></select></label><label id="reader-auto-interval-label">翻页间隔（秒）<input id="reader-auto-interval" type="number" min="1" max="300"></label><label id="reader-auto-speed-unit-label">速度单位<select id="reader-auto-speed-unit"><option value="pixels">像素/秒</option><option value="seconds">秒/页</option></select></label><label id="reader-auto-speed-label">速度（像素/秒）<input id="reader-auto-speed" type="number" min="10" max="1000"></label><label id="reader-auto-page-seconds-label">速度（秒/页）<input id="reader-auto-page-seconds" type="number" min="1" max="300"></label><p class="reader-hint">整页逐张翻图，下一张顶部对齐阅读区顶部；平滑“秒/页”按一屏计。等待图片加载，到末尾停止；手动操作或切到后台暂停。</p></div></details>' +
+      '<details data-section="reader-settings"><summary>设置</summary><div class="reader-settings"><label>沿方向预加载<input id="reader-ahead" type="number" min="0" max="20"></label><label>反方向保留<input id="reader-behind" type="number" min="0" max="20"></label><label>最大宽度<input id="reader-width" type="number" min="320" max="2400" step="10"></label><label>显示比例（%）<input id="reader-scale" type="number" min="25" max="200" step="5"></label><p class="reader-hint">相对适配宽度缩放，仅调整图片；放大后可横向滚动。</p><label>图片间距<input id="reader-gap" type="number" min="0" max="40"></label><label>自动重试次数<input id="reader-retries" type="number" min="0" max="20"></label><label>重试间隔（秒）<input id="reader-retry-interval" type="number" min="0" max="300"></label><p class="reader-hint">0 次关闭自动重试；手动重试立即执行。</p><p id="reader-status" role="status"></p></div></details>' +
       '<button id="reader-close">返回原页</button></header><main id="reader-scroll" tabindex="0" aria-label="纵向连续阅读"><div id="reader-pages"></div></main>';
     const $ = id => root.getElementById(id);
     const scroll = $('reader-scroll'), list = $('reader-pages');
@@ -128,6 +128,7 @@ function setupContinuousReader() {
       const anchor = ordered().find(record => record.element.getBoundingClientRect().bottom > viewport.top + 1);
       const before = anchor?.element.getBoundingClientRect().top;
       change();
+      updatePagePadding();
       if (anchor) scroll.scrollTop += anchor.element.getBoundingClientRect().top - before;
       lastTop = scroll.scrollTop;
     }
@@ -135,8 +136,14 @@ function setupContinuousReader() {
       const info = record.info;
       const width = info?.width || initial.width || config.maxWidth;
       const height = info?.height || initial.height || width * 1.4;
-      record.element.style.width = Math.min(width, config.maxWidth) + 'px';
+      record.element.style.width = Math.min(width, config.maxWidth, scroll.clientWidth || config.maxWidth) * config.scale / 100 + 'px';
       record.element.style.aspectRatio = width + ' / ' + height;
+    }
+    function updatePagePadding() {
+      const last = list.lastElementChild;
+      // A short final image still needs enough scroll range to align its top.
+      const padding = config.autoMode === 'page' && last ? Math.max(8, scroll.clientHeight - last.getBoundingClientRect().height) : 8;
+      list.style.paddingBottom = padding + 'px';
     }
     function add(index, url, info = null) {
       if (records.has(index)) return records.get(index);
@@ -338,6 +345,19 @@ function setupContinuousReader() {
         pauseAuto('已到最后一张，自动翻页已停止。'); return;
       }
       const viewport = scroll.getBoundingClientRect();
+      if (config.autoMode === 'page') {
+        const current = records.get(visible().first), next = current && records.get(current.index + 1);
+        if (current?.element.dataset.state === 'loaded' && !current.info.next) {
+          pauseAuto('已到最后一张，自动翻页已停止。'); return;
+        }
+        if (current?.element.dataset.state === 'loaded' && next?.element.dataset.state === 'loaded') {
+          autoElapsed += elapsed;
+          if (autoElapsed >= config.autoInterval * 1000) {
+            scroll.scrollTop += next.element.getBoundingClientRect().top - viewport.top; autoElapsed = 0;
+          }
+        } else { autoElapsed = 0; schedule(); }
+        autoFrame = requestAnimationFrame(autoTick); return;
+      }
       let readyBottom = viewport.top;
       for (const record of pages) {
         const rect = record.element.getBoundingClientRect();
@@ -349,22 +369,15 @@ function setupContinuousReader() {
       // Do not scroll an unloaded image or an error placeholder past the reader.
       const available = Math.min(remaining, Math.max(0, readyBottom - viewport.bottom));
       if (available >= 1) {
-        if (config.autoMode === 'page') {
-          autoElapsed += elapsed;
-          if (autoElapsed >= config.autoInterval * 1000) {
-            scroll.scrollTop += Math.min(scroll.clientHeight, available); autoElapsed = 0;
-          }
-        } else {
-          const speed = config.autoSpeedUnit === 'seconds' ? scroll.clientHeight / config.autoPageSeconds : config.autoSpeed;
-          autoDistance += Math.min(speed * elapsed / 1000, available);
-          const amount = Math.floor(autoDistance);
-          if (amount >= 1) {
-            const before = scroll.scrollTop;
-            scroll.scrollTop += amount; autoDistance -= scroll.scrollTop - before;
-          }
-          // Native scroll offsets round to pixels; keep the fractional motion on a compositor layer.
-          list.style.transform = 'translate3d(0,' + -autoDistance + 'px,0)';
+        const speed = config.autoSpeedUnit === 'seconds' ? scroll.clientHeight / config.autoPageSeconds : config.autoSpeed;
+        autoDistance += Math.min(speed * elapsed / 1000, available);
+        const amount = Math.floor(autoDistance);
+        if (amount >= 1) {
+          const before = scroll.scrollTop;
+          scroll.scrollTop += amount; autoDistance -= scroll.scrollTop - before;
         }
+        // Native scroll offsets round to pixels; keep the fractional motion on a compositor layer.
+        list.style.transform = 'translate3d(0,' + -autoDistance + 'px,0)';
       } else { autoElapsed = 0; schedule(); }
       autoFrame = requestAnimationFrame(autoTick);
     }
@@ -407,8 +420,18 @@ function setupContinuousReader() {
       onManualScroll();
       if (amount) scroll.scrollBy({ top: amount, behavior: 'auto' });
     }
-    function applyConfig() {
+    function applyConfig(preserveFraction = false) {
+      const anchor = preserveFraction ? records.get(visible().first)?.element : null;
+      const before = anchor?.getBoundingClientRect();
+      const fraction = before?.height ? Math.max(0, (scroll.getBoundingClientRect().top - before.top) / before.height) : 0;
+      const center = (scroll.scrollLeft + scroll.clientWidth / 2) / (scroll.scrollWidth || 1);
       preservePosition(() => { list.style.gap = config.gap + 'px'; for (const record of records.values()) layout(record); });
+      if (anchor && fraction > 0) {
+        const rect = anchor.getBoundingClientRect();
+        scroll.scrollTop += rect.top - scroll.getBoundingClientRect().top + fraction * rect.height;
+        lastTop = scroll.scrollTop;
+      }
+      if (preserveFraction) scroll.scrollLeft = center * scroll.scrollWidth - scroll.clientWidth / 2;
       schedule();
     }
     function onResize() {
@@ -439,11 +462,12 @@ function setupContinuousReader() {
         if (!values.includes(value)) { showAutoMode(); return; }
         try {
           updateUI({ reader: { [key]: value } }); config = readUI().reader; showAutoMode();
+          applyConfig();
           $('reader-status').textContent = '已保存并应用。';
         } catch { showAutoMode(); $('reader-status').textContent = '无法保存阅读设置。'; }
       });
     }
-    for (const [id, key, min, max] of [['reader-ahead', 'ahead', 0, 20], ['reader-behind', 'behind', 0, 20], ['reader-width', 'maxWidth', 320, 2400], ['reader-gap', 'gap', 0, 40], ['reader-retries', 'imageRetries', 0, 20], ['reader-retry-interval', 'retryInterval', 0, 300], ['reader-auto-interval', 'autoInterval', 1, 300], ['reader-auto-speed', 'autoSpeed', 10, 1000], ['reader-auto-page-seconds', 'autoPageSeconds', 1, 300]]) {
+    for (const [id, key, min, max] of [['reader-ahead', 'ahead', 0, 20], ['reader-behind', 'behind', 0, 20], ['reader-width', 'maxWidth', 320, 2400], ['reader-scale', 'scale', 25, 200], ['reader-gap', 'gap', 0, 40], ['reader-retries', 'imageRetries', 0, 20], ['reader-retry-interval', 'retryInterval', 0, 300], ['reader-auto-interval', 'autoInterval', 1, 300], ['reader-auto-speed', 'autoSpeed', 10, 1000], ['reader-auto-page-seconds', 'autoPageSeconds', 1, 300]]) {
       $(id).value = config[key];
       $(id).addEventListener('change', () => {
         const value = Number($(id).value);
@@ -451,7 +475,8 @@ function setupContinuousReader() {
         try {
           updateUI({ reader: { [key]: value } }); config = readUI().reader;
           if (['autoInterval', 'autoSpeed', 'autoPageSeconds'].includes(key)) resetAutoClock();
-          else if (key === 'imageRetries' || key === 'retryInterval') applyRetryConfig(); else applyConfig();
+          else if (key === 'imageRetries' || key === 'retryInterval') applyRetryConfig();
+          else { resetAutoClock(); applyConfig(key === 'scale' || key === 'maxWidth'); }
           $('reader-status').textContent = '已保存并应用。';
         }
         catch { $('reader-status').textContent = '无法保存阅读设置。'; }

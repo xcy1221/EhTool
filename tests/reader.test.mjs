@@ -196,6 +196,25 @@ test('auto paging settings validate, persist and never resume without a user act
   } finally { app.close(); }
 });
 
+test('reader image scale validates and persists without changing the original image or browser zoom', () => {
+  const app = open(1, { reader: { scale: 0 } });
+  const field = () => app.root.getElementById('reader-scale');
+  function change(value) { field().value = value; field().dispatchEvent(new app.window.Event('change')); }
+  try {
+    assert.equal(field().value, '100');
+    change('75');
+    for (const value of ['24', '201', '', '50.5']) change(value);
+    assert.equal(field().value, '75');
+    assert.equal(app.store.get(storeKey).reader.scale, 75);
+    assert.equal(app.root.querySelector('figure').style.width, '300px');
+    assert.equal(app.window.document.documentElement.style.getPropertyValue('zoom'), '');
+    app.root.getElementById('reader-close').click();
+    assert.equal(app.native.getAttribute('width'), '400');
+    app.root.getElementById('reader-start').click();
+    assert.equal(field().value, '75');
+  } finally { app.close(); }
+});
+
 test('the initial loaded or pending image is reused without cancelling or restarting its request', async () => {
   for (const pending of [false,true]) {
     const app=open(1,{reader:{ahead:0,behind:0}},null,window=>{
