@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         eh工具
 // @namespace    https://github.com/xcy1221/EhTool
-// @version      0.5.8
+// @version      0.5.9
 // @description  左侧浮动eh工具：标签组合与搜索、画廊悬停标签、评论区收起、明暗配色、画廊连续阅读
 // @match        https://e-hentai.org/*
 // @match        https://exhentai.org/*
@@ -122,7 +122,7 @@ function searchTags(tags, query, namespace = '', favorites = [], view = 'all', r
 const STORE = 'eh-search-tool:v1';
 const SITE_THEME = location.hostname === 'exhentai.org' ? 'dark' : 'light';
 const UI_STORE = 'eh-search-tool:ui:v1';
-const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, scale: 100, gap: 8, autoMode: 'page', autoInterval: 5, autoSpeed: 40, autoSpeedUnit: 'pixels', autoPageSeconds: 20 });
+const READER_DEFAULTS = Object.freeze({ enabled: true, ahead: 5, behind: 3, concurrency: 2, imageRetries: 1, retryInterval: 3, timeout: 15000, maxWidth: 1100, scale: 100, gap: 8, autoMode: 'page', autoInterval: 5, autoSpeed: 40, autoSpeedUnit: 'pixels', autoPageSeconds: 20, autoLoop: false });
 
 function readStore(key, fallback) {
   try {
@@ -165,6 +165,7 @@ function readUI() {
       autoSpeed: boundedNumber(reader?.autoSpeed, READER_DEFAULTS.autoSpeed, 10, 1000),
       autoSpeedUnit: ['pixels', 'seconds'].includes(reader?.autoSpeedUnit) ? reader.autoSpeedUnit : READER_DEFAULTS.autoSpeedUnit,
       autoPageSeconds: boundedNumber(reader?.autoPageSeconds, READER_DEFAULTS.autoPageSeconds, 1, 300),
+      autoLoop: reader?.autoLoop === true,
     },
   };
 }
@@ -447,7 +448,7 @@ function parseReaderPage(doc, value) {
     } catch { return null; }
   }).find(Boolean);
   return {
-    ...page, imageUrl: imageUrl.href, reloadUrl: reloadToken ? reload.href : null, prev: adjacent(-1, '#prev'), next: adjacent(1, '#next'), total, gallery,
+    ...page, imageUrl: imageUrl.href, reloadUrl: reloadToken ? reload.href : null, prev: adjacent(-1, '#prev'), next: adjacent(1, '#next'), first: page.index === 1 ? page.url : adjacent(1 - page.index, '#first'), total, gallery,
     width: image.naturalWidth || Number(image.getAttribute('width')) || parseFloat(image.style.width) || 0,
     height: image.naturalHeight || Number(image.getAttribute('height')) || parseFloat(image.style.height) || 0,
   };
@@ -457,6 +458,13 @@ function readerBounds(first, last, direction, config, total) {
     first: Math.max(1, first - (direction > 0 ? config.behind : config.ahead)),
     last: Math.min(total || Infinity, last + (direction > 0 ? config.ahead : config.behind)),
   };
+}
+function readerWindow(first, last, direction, config, total) {
+  const bounds = readerBounds(first, last, direction, config, total), indices = new Set();
+  for (let index = bounds.first; index <= bounds.last; index++) indices.add(index);
+  const overflow = total ? Math.min(total, Math.max(0, last + (direction > 0 ? config.ahead : config.behind) - total)) : 0;
+  for (let index = 1; index <= overflow; index++) indices.add(index);
+  return indices;
 }
 
 function setupContinuousReader() {
@@ -501,8 +509,8 @@ function setupContinuousReader() {
     root.innerHTML = '<style>' + READER_STYLE + '</style>' +
       '<header><strong>连续阅读</strong><span id="reader-progress" role="status"></span><a id="reader-gallery">画廊</a><button id="reader-theme"></button>' +
       '<button id="reader-auto-toggle" aria-pressed="false">自动翻页</button>' +
-      '<details data-section="reader-auto-settings"><summary>翻页设置</summary><div class="reader-settings"><label>翻页方式<select id="reader-auto-mode"><option value="page">整页翻页</option><option value="smooth">平滑翻页</option></select></label><label id="reader-auto-interval-label">翻页间隔（秒）<input id="reader-auto-interval" type="number" min="1" max="300"></label><label id="reader-auto-speed-unit-label">速度单位<select id="reader-auto-speed-unit"><option value="pixels">像素/秒</option><option value="seconds">秒/页</option></select></label><label id="reader-auto-speed-label">速度（像素/秒）<input id="reader-auto-speed" type="number" min="10" max="1000"></label><label id="reader-auto-page-seconds-label">速度（秒/页）<input id="reader-auto-page-seconds" type="number" min="1" max="300"></label><p class="reader-hint">整页逐张翻图，下一张顶部对齐阅读区顶部；平滑“秒/页”按一屏计。等待图片加载，到末尾停止；手动操作或切到后台暂停。</p></div></details>' +
-      '<details data-section="reader-settings"><summary>设置</summary><div class="reader-settings"><label>沿方向预加载<input id="reader-ahead" type="number" min="0" max="20"></label><label>反方向保留<input id="reader-behind" type="number" min="0" max="20"></label><label>最大宽度<input id="reader-width" type="number" min="320" max="2400" step="10"></label><label>显示比例（%）<input id="reader-scale" type="number" min="25" max="200" step="5"></label><p class="reader-hint">相对适配宽度缩放，仅调整图片；放大后可横向滚动。</p><label>图片间距<input id="reader-gap" type="number" min="0" max="40"></label><label>自动重试次数<input id="reader-retries" type="number" min="0" max="20"></label><label>重试间隔（秒）<input id="reader-retry-interval" type="number" min="0" max="300"></label><p class="reader-hint">0 次关闭自动重试；手动重试立即执行。</p><p id="reader-status" role="status"></p></div></details>' +
+      '<details data-section="reader-settings"><summary>设置</summary><div class="reader-settings"><h3>自动翻页</h3><label>翻页方式<select id="reader-auto-mode"><option value="page">整页翻页</option><option value="smooth">平滑翻页</option></select></label><label>自动循环画廊<input id="reader-auto-loop" type="checkbox"></label><label id="reader-auto-interval-label">翻页 / 循环间隔（秒）<input id="reader-auto-interval" type="number" min="1" max="300"></label><label id="reader-auto-speed-unit-label">速度单位<select id="reader-auto-speed-unit"><option value="pixels">像素/秒</option><option value="seconds">秒/页</option></select></label><label id="reader-auto-speed-label">速度（像素/秒）<input id="reader-auto-speed" type="number" min="10" max="1000"></label><label id="reader-auto-page-seconds-label">速度（秒/页）<input id="reader-auto-page-seconds" type="number" min="1" max="300"></label><p class="reader-hint">整页逐张贴顶；平滑“秒/页”按一屏计。开启循环后，到末尾等待上述间隔再回首图；关闭则停止。手动操作或切到后台暂停。</p>' +
+      '<h3>图片与缓存</h3><label>沿方向预加载<input id="reader-ahead" type="number" min="0" max="20"></label><label>反方向保留<input id="reader-behind" type="number" min="0" max="20"></label><label>最大宽度<input id="reader-width" type="number" min="320" max="2400" step="10"></label><label>显示比例（%）<input id="reader-scale" type="number" min="25" max="200" step="5"></label><p class="reader-hint">相对适配宽度缩放，仅调整图片；放大后可横向滚动。末尾预加载会接续首部，共用上述张数。</p><label>图片间距<input id="reader-gap" type="number" min="0" max="40"></label><label>自动重试次数<input id="reader-retries" type="number" min="0" max="20"></label><label>重试间隔（秒）<input id="reader-retry-interval" type="number" min="0" max="300"></label><p class="reader-hint">0 次关闭自动重试；手动重试立即执行。</p><p id="reader-status" role="status"></p></div></details>' +
       '<button id="reader-close">返回原页</button></header><main id="reader-scroll" tabindex="0" aria-label="纵向连续阅读"><div id="reader-pages"></div></main>';
     const $ = id => root.getElementById(id);
     const scroll = $('reader-scroll'), list = $('reader-pages');
@@ -512,22 +520,26 @@ function setupContinuousReader() {
     setupSections(root, message => { $('reader-status').textContent = message; });
     let config = readUI().reader;
     let nativeTaken = false, restoring = false;
-    let active = true, direction = 1, lastTop = 0, frame = 0, total = initial.total;
-    let autoRunning = false, autoFrame = 0, autoLast = null, autoElapsed = 0, autoDistance = 0;
+    let active = true, direction = 1, lastTop = 0, frame = 0, total = initial.total || (!initial.next ? initial.index : null);
+    let autoRunning = false, autoFrame = 0, autoLast = null, autoElapsed = 0, autoDistance = 0, loopElapsed = 0;
+    let firstUrl = initial.first;
     let bounds = readerBounds(initial.index, initial.index, direction, config, total);
+    let windowIndices = readerWindow(initial.index, initial.index, direction, config, total);
     const records = new Map(), tasks = new Map();
     let viewAnchor = null, viewWidth = scroll.clientWidth;
     function ordered() { return [...records.values()].sort((a, b) => a.index - b.index); }
-    function inside(index) { return index >= bounds.first && index <= bounds.last; }
+    function inside(index) { return windowIndices.has(index); }
     function visible() {
       const viewport = scroll.getBoundingClientRect();
       const pages = ordered().filter(record => {
+        if (!record.element.isConnected) return false;
         const rect = record.element.getBoundingClientRect();
         return rect.bottom > viewport.top + 1 && rect.top < viewport.bottom - 1;
       });
       if (pages.length) return { first: pages[0].index, last: pages.at(-1).index };
       // A resize or an exceptionally long gap can temporarily leave no page intersecting.
       const nearest = ordered().reduce((best, record) => {
+        if (!record.element.isConnected) return best;
         const distance = Math.abs(record.element.getBoundingClientRect().top - viewport.top);
         return !best || distance < best.distance ? { index: record.index, distance } : best;
       }, null);
@@ -535,7 +547,7 @@ function setupContinuousReader() {
     }
     function preservePosition(change) {
       const viewport = scroll.getBoundingClientRect();
-      const anchor = ordered().find(record => record.element.getBoundingClientRect().bottom > viewport.top + 1);
+      const anchor = ordered().find(record => record.element.isConnected && record.element.getBoundingClientRect().bottom > viewport.top + 1);
       const before = anchor?.element.getBoundingClientRect().top;
       change();
       updatePagePadding();
@@ -556,7 +568,11 @@ function setupContinuousReader() {
       list.style.paddingBottom = padding + 'px';
     }
     function add(index, url, info = null) {
-      if (records.has(index)) return records.get(index);
+      if (records.has(index)) {
+        const record = records.get(index);
+        if (!record.element.isConnected && index >= bounds.first && index <= bounds.last) mount(record);
+        return record;
+      }
       const element = document.createElement('figure');
       element.dataset.page = index;
       element.dataset.state = 'idle';
@@ -565,11 +581,18 @@ function setupContinuousReader() {
       element.append(caption, placeholder);
       const record = { index, url, info, element, placeholder, image: null, error: false, reloadUrl: info?.reloadUrl, refresh: false, recoveries: 0, retryTimer: null, retryStarted: 0, retryError: null };
       records.set(index, record); layout(record);
-      const following = ordered().find(other => other.index > index);
-      preservePosition(() => list.insertBefore(element, following?.element || null));
+      if (index >= bounds.first && index <= bounds.last) mount(record);
       return record;
     }
+    function mount(record) {
+      const mounted = ordered().filter(other => other.element.isConnected);
+      const preceding = mounted.findLast(other => other.index < record.index), following = mounted.find(other => other.index > record.index);
+      // Separately cached ranges must not collapse an undiscovered gap in the reading flow.
+      if ((preceding && preceding.index !== record.index - 1) || (following && following.index !== record.index + 1)) return;
+      preservePosition(() => list.insertBefore(record.element, following?.element || null));
+    }
     function neighbors() {
+      if (inside(1) && firstUrl) add(1, firstUrl);
       for (const record of ordered()) {
         if (!record.info) continue;
         for (const [index, url] of [[record.index - 1, record.info.prev], [record.index + 1, record.info.next]]) {
@@ -666,6 +689,8 @@ function setupContinuousReader() {
         if (!active || task.cancelled) return;
         preservePosition(() => { record.info = info; record.reloadUrl = info.reloadUrl; record.refresh = false; layout(record); });
         if (info.total) total = info.total;
+        if (!info.next) total = info.index;
+        if (info.first) firstUrl = info.first;
       })().then(() => finish(record, task), error => finish(record, task, timedOut ? new Error('请求超时') : error)).finally(() => clearTimeout(timer));
     }
     function loadImage(record) {
@@ -709,7 +734,9 @@ function setupContinuousReader() {
       if (anchorRect?.height) viewAnchor = { index: range.first, fraction: (scroll.getBoundingClientRect().top - anchorRect.top) / anchorRect.height };
       viewWidth = scroll.clientWidth;
       // Automatic reading needs a next image even when manual preloading is disabled.
-      bounds = readerBounds(range.first, range.last, direction, autoRunning ? { ...config, ahead: Math.max(1, config.ahead) } : config, total);
+      const loadingConfig = autoRunning ? { ...config, ahead: Math.max(1, config.ahead) } : config;
+      bounds = readerBounds(range.first, range.last, direction, loadingConfig, total);
+      windowIndices = readerWindow(range.first, range.last, direction, loadingConfig, total);
       host.dataset.direction = direction > 0 ? 'down' : 'up';
       host.dataset.first = bounds.first; host.dataset.last = bounds.last;
       $('reader-progress').textContent = '第 ' + range.first + ' 张' + (total ? ' / ' + total : '');
@@ -720,6 +747,7 @@ function setupContinuousReader() {
       }
       const priority = record => {
         if (record.index >= range.first && record.index <= range.last) return -1000;
+        if (record.index < bounds.first && inside(record.index)) return direction > 0 ? total - range.last + record.index : 100 + total - range.last + record.index;
         return direction > 0
           ? record.index > range.last ? record.index - range.last : 100 + range.first - record.index
           : record.index < range.first ? range.first - record.index : 100 + record.index - range.last;
@@ -732,7 +760,7 @@ function setupContinuousReader() {
     }
     function schedule() { if (active && !frame) frame = requestAnimationFrame(reconcile); }
     function resetAutoClock() {
-      autoLast = null; autoElapsed = 0;
+      autoLast = null; autoElapsed = 0; loopElapsed = 0;
       if (autoDistance) scroll.scrollTop += autoDistance;
       autoDistance = 0; list.style.transform = '';
     }
@@ -744,6 +772,25 @@ function setupContinuousReader() {
       if (message) $('reader-status').textContent = message;
       schedule();
     }
+    function atGalleryEnd(elapsed) {
+      if (!config.autoLoop) { pauseAuto('已到最后一张，自动翻页已停止。'); return; }
+      if (!firstUrl && !records.has(1)) { pauseAuto('无法获取首图地址，循环已暂停。'); return; }
+      loopElapsed += elapsed;
+      if ($('reader-status').textContent !== '已到末尾，等待循环回首图…') $('reader-status').textContent = '已到末尾，等待循环回首图…';
+      schedule();
+      const first = records.get(1);
+      if (first?.error) { pauseAuto('首图加载失败，循环已暂停。'); return; }
+      if (loopElapsed < config.autoInterval * 1000 || first?.element.dataset.state !== 'loaded') return;
+      resetAutoClock();
+      const prefix = [];
+      for (let index = 1; records.has(index); index++) prefix.push(records.get(index).element);
+      // Keep separately cached head images out of the scrolling tail until the wrap.
+      list.replaceChildren(...prefix); updatePagePadding();
+      scroll.scrollTop = 0;
+      scroll.scrollTop += first.element.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+      lastTop = scroll.scrollTop; direction = 1;
+      $('reader-status').textContent = '已循环回首图。'; schedule();
+    }
     function autoTick(timestamp) {
       autoFrame = 0;
       if (!active || !autoRunning) return;
@@ -752,13 +799,17 @@ function setupContinuousReader() {
       const pages = [...records.values()].filter(record => inside(record.index)).sort((a, b) => a.index - b.index), last = pages.at(-1);
       const remaining = Math.max(0, scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop);
       if (remaining <= 1 && last?.element.dataset.state === 'loaded' && !last.info.next) {
-        pauseAuto('已到最后一张，自动翻页已停止。'); return;
+        atGalleryEnd(elapsed);
+        if (autoRunning) autoFrame = requestAnimationFrame(autoTick);
+        return;
       }
       const viewport = scroll.getBoundingClientRect();
       if (config.autoMode === 'page') {
         const current = records.get(visible().first), next = current && records.get(current.index + 1);
         if (current?.element.dataset.state === 'loaded' && !current.info.next) {
-          pauseAuto('已到最后一张，自动翻页已停止。'); return;
+          atGalleryEnd(elapsed);
+          if (autoRunning) autoFrame = requestAnimationFrame(autoTick);
+          return;
         }
         if (current?.element.dataset.state === 'loaded' && next?.element.dataset.state === 'loaded') {
           autoElapsed += elapsed;
@@ -768,6 +819,7 @@ function setupContinuousReader() {
         } else { autoElapsed = 0; schedule(); }
         autoFrame = requestAnimationFrame(autoTick); return;
       }
+      loopElapsed = 0;
       let readyBottom = viewport.top;
       for (const record of pages) {
         const rect = record.element.getBoundingClientRect();
@@ -859,13 +911,20 @@ function setupContinuousReader() {
     function showAutoMode() {
       $('reader-auto-mode').value = config.autoMode;
       $('reader-auto-speed-unit').value = config.autoSpeedUnit;
-      $('reader-auto-interval-label').hidden = config.autoMode !== 'page';
+      $('reader-auto-loop').checked = config.autoLoop;
+      $('reader-auto-interval-label').hidden = config.autoMode !== 'page' && !config.autoLoop;
       $('reader-auto-speed-unit-label').hidden = config.autoMode !== 'smooth';
       $('reader-auto-speed-label').hidden = config.autoMode !== 'smooth' || config.autoSpeedUnit !== 'pixels';
       $('reader-auto-page-seconds-label').hidden = config.autoMode !== 'smooth' || config.autoSpeedUnit !== 'seconds';
       resetAutoClock();
     }
     showAutoMode();
+    $('reader-auto-loop').addEventListener('change', () => {
+      try {
+        updateUI({ reader: { autoLoop: $('reader-auto-loop').checked } }); config = readUI().reader;
+        showAutoMode(); applyConfig(); $('reader-status').textContent = '已保存并应用。';
+      } catch { showAutoMode(); $('reader-status').textContent = '无法保存阅读设置。'; }
+    });
     for (const [id, key, values] of [['reader-auto-mode', 'autoMode', ['page', 'smooth']], ['reader-auto-speed-unit', 'autoSpeedUnit', ['pixels', 'seconds']]]) {
       $(id).addEventListener('change', () => {
         const value = $(id).value;
@@ -973,7 +1032,7 @@ function setupGalleryComments() {
 }
 
 const STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; left:12px; top:72px; width:540px; max-width:calc(100vw - 24px); z-index:2147482000; display:block; color:var(--text); font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; pointer-events:none; }\n* { box-sizing:border-box; }\n[hidden] { display:none !important; }\nsection { display:flex; flex-direction:column; max-height:calc(100vh - 88px); max-height:calc(100dvh - 88px); background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; pointer-events:auto; }\nheader { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:14px 16px; background:var(--subtle); border-bottom:1px solid var(--border); flex-shrink:0; }\nh2 { font-size:19px; margin:0; font-weight:650; }\nh3 { font-size:13px; margin:0; } h3 span { color:var(--muted); margin-left:5px; }\n#body { padding:14px 16px; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:thin; min-height:0; }\nbutton, input, select, textarea { font:inherit; }\nbutton, .file-button { color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; cursor:pointer; line-height:1.4; }\nbutton:hover, .file-button:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:disabled { opacity:.5; cursor:default; }\nbutton:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible, .file-button:focus-within { outline:2px solid var(--accent); outline-offset:2px; }\ninput:not([type=checkbox]):not([type=file]), select, textarea { width:100%; min-width:0; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:7px 9px; min-height:34px; }\ninput[type=checkbox] { accent-color:var(--accent); }\nlabel { display:block; min-width:0; font-size:11px; color:var(--muted); } label input, label select { margin-top:4px; }\n.block-title { margin-bottom:9px; } .native-filters { display:flex; align-items:end; gap:10px; margin-bottom:18px; }\nfieldset { border:0; padding:0; margin:0; min-width:0; flex:1; } legend { padding:0; font-size:11px; color:var(--muted); }\n.native-filters > label { width:84px; flex-shrink:0; } .range { display:flex; align-items:center; gap:5px; } .range label { flex:1; font-size:0; } .range input { font-size:12px; } .range span { color:var(--muted); padding-top:4px; }\n.toolbar { display:flex; gap:8px; align-items:end; } .grow { flex:1; min-width:0; } .toolbar > label:not(.grow) { width:100px; }\n.tabs { display:flex; gap:6px; margin:0 0 10px; } .tabs button { flex:1; font-size:12px; padding:7px; }\n.tabs button[aria-pressed=true] { color:var(--accent); background:var(--hover); border-color:var(--accent-hover); font-weight:600; }\n.exact { display:flex; align-items:center; gap:6px; margin-top:10px; } .exact input { margin:0; }\n.list-meta, .query-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:10px; margin:10px 0 6px; }\n.tag-purpose { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-top:10px; font-size:11px; color:var(--muted); }\n.tag-purpose button { font-size:11px; padding:5px 9px; }\n[data-add-mode=include] { color:var(--include); border-color:var(--include-border); }\n[data-add-mode=exclude] { color:var(--exclude); border-color:var(--exclude-border); }\n[data-add-mode=or] { color:var(--or); border-color:var(--or-border); }\n[data-add-mode=include][aria-pressed=true] { background:var(--include-solid); color:var(--on-accent); border-color:var(--include-solid); }\n[data-add-mode=exclude][aria-pressed=true] { background:var(--exclude-solid); color:var(--on-accent); border-color:var(--exclude-solid); }\n[data-add-mode=or][aria-pressed=true] { background:var(--or); color:var(--on-accent); border-color:var(--or); }\n#results { display:flex; flex-wrap:wrap; align-content:flex-start; gap:6px; max-height:190px; overflow-y:auto; scrollbar-width:thin; padding:2px; }\n.tag-row { border:1px solid var(--border); border-radius:6px; min-width:0; max-width:100%; padding:5px 10px; background:var(--surface); font-size:12px; overflow-wrap:anywhere; }\n.tag-row.include { border-color:var(--include-border); color:var(--include); background:var(--include-bg); }\n.tag-row.exclude { border-color:var(--exclude-border); color:var(--exclude); background:var(--exclude-bg); }\n.tag-row.or { border-color:var(--or-border); color:var(--or); background:var(--or-bg); }\n.more { text-align:center; } .more button { margin-top:6px; padding:3px 10px; font-size:11px; }\n.selection-title { display:flex; align-items:center; justify-content:space-between; margin-top:15px; border-top:1px solid var(--border); padding-top:12px; }\n.selection-title button { padding:3px 7px; font-size:10px; }\n#selected { margin-top:8px; } .selected-group { border-left:3px solid var(--include-border); background:var(--include-bg); border-radius:4px; padding:8px; margin-top:6px; }\n.selected-group > strong { color:var(--include); font-size:12px; } .selected-group .hint { margin:2px 0 5px; font-size:10px; }\n.selected-group.exclude { border-color:var(--exclude-border); background:var(--exclude-bg); } .selected-group.exclude > strong { color:var(--exclude); }\n.selected-group.or { border-color:var(--or-border); background:var(--or-bg); } .selected-group.or > strong { color:var(--or); }\n.chip { display:flex; align-items:center; gap:4px; margin-top:4px; min-width:0; background:var(--surface); border-radius:4px; padding:4px 5px; }\n.selected-name { flex:1; min-width:0; overflow-wrap:anywhere; font-size:12px; }\n.chip button { padding:3px 5px; font-size:10px; border-color:transparent; background:transparent; flex-shrink:0; }\n.chip .to-include { color:var(--include); } .chip .to-exclude { color:var(--exclude); } .chip .to-or { color:var(--or); }\n.keywords { margin-top:12px; }\n#query { font:11px/1.6 ui-monospace,Consolas,monospace; background:var(--subtle); resize:vertical; min-height:54px; }\n.small-actions { display:flex; gap:7px; margin-top:8px; } .small-actions button { font-size:11px; padding:5px 7px; }\nfooter { padding:11px 16px; border-top:1px solid var(--border); background:var(--subtle); flex-shrink:0; }\n.search-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }\n.search-actions button { width:100%; }\nbutton.primary { background:var(--accent); color:var(--on-accent); border-color:var(--accent); font-weight:600; } button.primary:hover { background:var(--accent-hover); }\n.hint { font-size:10px; color:var(--muted); margin:4px 0; }\n.empty { color:var(--muted); font-size:11px; margin:8px 0; }\ndetails { margin-top:12px; border-top:1px solid var(--border); padding-top:8px; }\nsummary { cursor:pointer; color:var(--muted); font-size:11px; padding:3px 0; }\n.manual { display:flex; align-items:end; flex-wrap:wrap; gap:7px; margin-top:9px; } .manual .grow { flex-basis:100%; }\n.preset-row { display:flex; align-items:end; gap:7px; margin-top:9px; } .preset-row button { font-size:11px; }\n.preset { display:inline-flex; margin:7px 5px 0 0; } .preset button { padding:5px 7px; font-size:11px; }\n.dictionary { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .dictionary > div { width:100%; }\n.dictionary strong { font-size:11px; } .dictionary button, .file-button { font-size:11px; }\n.file-button { position:relative; overflow:hidden; } .file-button input { position:absolute; opacity:0; inset:0; width:100%; cursor:pointer; }\na { color:var(--include); font-size:10px; }\n#status { margin:5px 0 0; font-size:11px; color:var(--include); overflow-wrap:anywhere; }\n.error, #status.error { color:var(--exclude); }\n#launcher { pointer-events:auto; padding:10px 12px; background:var(--accent); color:var(--on-accent); border-color:var(--accent); box-shadow:0 4px 16px var(--shadow); }\n@media(max-width:600px) { :host { top:12px; } section { max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px); } }\n\n.header-actions { display:flex; gap:6px; flex-shrink:0; }\n.block { margin:0 0 12px; border:1px solid var(--border); border-radius:7px; padding:0; }\n.block > summary { padding:9px 10px; color:var(--text); font-size:12px; font-weight:600; background:var(--subtle); border-radius:6px; }\n.block > summary span { color:var(--muted); font-size:11px; font-weight:400; margin-left:8px; }\n.block-content { padding:10px; }\n.block-content > details:first-child { margin-top:0; }\n.native-filters { margin-bottom:0; }\n.selection-title { margin-top:0; border:0; padding-top:0; }\n.reading-options { display:flex; gap:10px; margin-top:10px; }\n.reading-options label { flex:1; }\n@media(max-width:420px) { header { padding:10px; gap:6px; } header .hint { max-width:140px; } #body { padding:10px; } footer { padding:10px; } }\n\n#hover-groups { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:10px; }\n#hover-groups legend { margin-bottom:4px; }\n#hover-delay { max-width:120px; }\n";
-const READER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; inset:0; z-index:2147481000; display:flex; flex-direction:column; background:var(--subtle); color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host(.inactive) { inset:auto auto 12px 12px; background:transparent; }\n* { box-sizing:border-box; } [hidden] { display:none !important; }\nheader { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }\n#reader-progress { flex:1; color:var(--muted); white-space:nowrap; }\nbutton, summary, input, select { font:inherit; }\nbutton, summary { border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--text); padding:5px 9px; cursor:pointer; }\nbutton:hover, summary:hover { background:var(--hover); }\nbutton:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n#reader-auto-toggle[aria-pressed=\"true\"] { background:var(--hover); border-color:var(--accent); }\na { color:var(--text); }\ndetails > summary { list-style:none; } details { position:relative; }\n.reader-settings { position:absolute; top:38px; right:0; width:270px; max-height:calc(100dvh - 64px); overflow-y:auto; max-width:calc(100vw - 24px); padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:7px; box-shadow:0 4px 20px var(--shadow); z-index:2; }\n.reader-settings label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; gap:8px; }\n.reader-settings input, .reader-settings select { width:96px; min-width:0; background:var(--subtle); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:4px; }\n#reader-status { color:var(--muted); margin:5px 0 0; font-size:12px; }\n#reader-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; outline:none; overflow-anchor:none; }\n#reader-pages { display:flex; flex-direction:column; align-items:center; width:max-content; min-width:100%; padding:8px 0; min-height:100%; overflow-anchor:none; }\nfigure { position:relative; flex-shrink:0; max-width:100%; margin:0; background:var(--surface); overflow:hidden; overflow-anchor:none; }\nfigure > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }\nfigcaption { position:absolute; left:6px; top:6px; padding:2px 6px; border-radius:4px; color:var(--muted); background:var(--surface); font-size:11px; opacity:.8; z-index:1; pointer-events:none; }\n.placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--muted); text-align:center; }\n@media(max-width:480px) { header { padding:6px; gap:5px; } header strong { display:none; } button,summary { padding:5px 7px; font-size:12px; } .reader-settings { position:fixed; top:48px; right:8px; } }\n\n.reader-hint { color:var(--muted); font-size:12px; margin:8px 0; }\n";
+const READER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; inset:0; z-index:2147481000; display:flex; flex-direction:column; background:var(--subtle); color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host(.inactive) { inset:auto auto 12px 12px; background:transparent; }\n* { box-sizing:border-box; } [hidden] { display:none !important; }\nheader { display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }\n#reader-progress { flex:1; color:var(--muted); white-space:nowrap; }\nbutton, summary, input, select { font:inherit; }\nbutton, summary { border:1px solid var(--border); border-radius:5px; background:var(--surface); color:var(--text); padding:5px 9px; cursor:pointer; }\nbutton:hover, summary:hover { background:var(--hover); }\nbutton:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n#reader-auto-toggle[aria-pressed=\"true\"] { background:var(--hover); border-color:var(--accent); }\na { color:var(--text); }\ndetails > summary { list-style:none; } details { position:relative; }\n.reader-settings { position:absolute; top:38px; right:0; width:270px; max-height:calc(100dvh - 64px); overflow-y:auto; max-width:calc(100vw - 24px); padding:12px; background:var(--surface); border:1px solid var(--border); border-radius:7px; box-shadow:0 4px 20px var(--shadow); z-index:2; }\n.reader-settings label { display:flex; justify-content:space-between; align-items:center; margin:6px 0; gap:8px; }\n.reader-settings input, .reader-settings select { width:96px; min-width:0; background:var(--subtle); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:4px; }\n.reader-settings input[type=\"checkbox\"] { width:auto; }\n.reader-settings h3 { font-size:13px; margin:12px 0 6px; } .reader-settings h3:first-child { margin-top:0; }\n#reader-status { color:var(--muted); margin:5px 0 0; font-size:12px; }\n#reader-scroll { flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain; outline:none; overflow-anchor:none; }\n#reader-pages { display:flex; flex-direction:column; align-items:center; width:max-content; min-width:100%; padding:8px 0; min-height:100%; overflow-anchor:none; }\nfigure { position:relative; flex-shrink:0; max-width:100%; margin:0; background:var(--surface); overflow:hidden; overflow-anchor:none; }\nfigure > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }\nfigcaption { position:absolute; left:6px; top:6px; padding:2px 6px; border-radius:4px; color:var(--muted); background:var(--surface); font-size:11px; opacity:.8; z-index:1; pointer-events:none; }\n.placeholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--muted); text-align:center; }\n@media(max-width:480px) { header { padding:6px; gap:5px; } header strong { display:none; } button,summary { padding:5px 7px; font-size:12px; } .reader-settings { position:fixed; top:48px; right:8px; } }\n\n.reader-hint { color:var(--muted); font-size:12px; margin:8px 0; }\n";
 const COMMENTS_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { display:block; margin:12px auto; max-width:100%; font:13px/1.5 system-ui,-apple-system,\"Segoe UI\",\"Microsoft YaHei\",sans-serif; text-align:left; }\ndiv { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; background:var(--subtle); color:var(--text); border:1px solid var(--border); border-radius:7px; }\nbutton { font:inherit; color:var(--text); background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 10px; cursor:pointer; }\nbutton:hover { background:var(--hover); border-color:var(--accent-hover); }\nbutton:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }\n";
 const HOVER_STYLE = ":host {\n  --text:#29372f; --muted:#637164; --surface:#fff; --subtle:#f2f6f1; --border:#ced9cc; --hover:#eaf3e6;\n  --accent:#426c49; --accent-hover:#355a3c; --on-accent:#fff; --shadow:#17291b33;\n  --include:#2d6b31; --include-bg:#eaf5e5; --include-border:#84b87c; --include-solid:#3d773f;\n  --exclude:#a04a3e; --exclude-bg:#fceeea; --exclude-border:#d49c91; --exclude-solid:#b45a4e;\n  --or:#4c6693; --or-bg:#f1f5fc; --or-border:#8aa5d1; --or-solid:#4c6693;\n  color-scheme:light;\n}\n:host([data-theme=dark]) {\n  --text:#e2e7df; --muted:#acb7a7; --surface:#292c28; --subtle:#22251f; --border:#505747; --hover:#394331;\n  --accent:#526d3d; --accent-hover:#627e4b; --on-accent:#fff; --shadow:#0007;\n  --include:#b3d9a9; --include-bg:#30412b; --include-border:#66835a; --include-solid:#45663d;\n  --exclude:#f0b0a5; --exclude-bg:#472e2a; --exclude-border:#99665c; --exclude-solid:#8a453a;\n  --or:#b4c8ee; --or-bg:#2c3546; --or-border:#687fab; --or-solid:#425c86;\n  color-scheme:dark;\n}\n\n:host { position:fixed; right:12px; top:72px; width:320px; max-width:calc(100vw - 24px); z-index:2147482001; color:var(--text); font:13px/1.5 system-ui,\"Microsoft YaHei\",sans-serif; text-align:left; }\n:host([hidden]) { display:none; }\n* { box-sizing:border-box; }\nsection { background:var(--surface); border:1px solid var(--border); border-radius:12px; box-shadow:0 8px 32px var(--shadow); overflow:hidden; }\nheader { display:flex; align-items:start; gap:8px; padding:12px; background:var(--subtle); border-bottom:1px solid var(--border); }\nh2 { flex:1; min-width:0; margin:0; font-size:14px; overflow-wrap:anywhere; }\nbutton { flex-shrink:0; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:5px; background:var(--surface); cursor:pointer; }\nbutton:hover { background:var(--hover); }\nbutton:focus-visible { outline:2px solid var(--accent); }\n#hover-content { padding:12px; overflow-y:auto; max-height:calc(100vh - 190px); max-height:calc(100dvh - 190px); scrollbar-width:thin; }\n.tag-group + .tag-group { margin-top:12px; }\nh3 { margin:0 0 5px; color:var(--muted); font-size:12px; }\n.tags { display:flex; flex-wrap:wrap; gap:5px; }\n.tag { padding:3px 7px; border:1px solid var(--border); border-radius:5px; background:var(--subtle); overflow-wrap:anywhere; max-width:100%; }\n@media(max-width:900px) { :host { top:auto; bottom:12px; } #hover-content { max-height:35vh; max-height:35dvh; } }\n";
 const DICTIONARY = 'eh-search-tool:dictionary:v1';

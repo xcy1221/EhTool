@@ -14,6 +14,7 @@ function html(index, origin, broken = false, total = 22) {
   const [width, height] = dimensions(index);
   return '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>阅读模拟</title>' +
     '<div id="i2"><div class="sn"><span>' + index + '</span> / <span>' + total + '</span></div></div>' +
+    '<a id="first" href="' + source(1, origin) + '">First</a>' +
     (index > 1 ? '<a id="prev" href="' + source(index - 1, origin) + '">Prev</a>' : '') +
     (index < total ? '<a id="next" href="' + source(index + 1, origin) + '">Next</a>' : '') +
     '<a href="/g/123/abcdef/">Gallery</a><img id="img" width="' + width + '" height="' + height + '" src="https://reader-images.invalid/' + (broken ? 'broken' : index) + '.svg">' +
@@ -137,7 +138,7 @@ try {
     assert.equal(windowCheck.boundsLast, Math.min(22, windowCheck.last+(windowCheck.direction==='down'?5:3)));
     await page.screenshot({ path: 'test-results/reader-mobile.png' });
     const auto = host.locator('#reader-auto-toggle');
-    const autoSettings = host.locator('[data-section="reader-auto-settings"]');
+    const autoSettings = host.locator('[data-section="reader-settings"]');
     assert.equal(await auto.getAttribute('aria-pressed'), 'false');
     await autoSettings.locator('summary').click();
     await host.locator('#reader-auto-interval').fill('1');
@@ -225,6 +226,67 @@ try {
     await context.close();
   }
 
+  for (const mode of ['page', 'smooth']) {
+    const context = await browser.newContext({ viewport: { width: 800, height: 700 } });
+    await context.addInitScript(mode => localStorage.setItem('eh-search-tool:ui:v1', JSON.stringify({ reader: { ahead: 2, behind: 1, autoLoop: true, autoMode: mode, autoInterval: 1, autoSpeed: 1000 } })), mode);
+    const page = await context.newPage(), origin = 'https://e-hentai.org', metadata = [], images = [];
+    page.setDefaultTimeout(10000); page.on('pageerror', error => errors.push(error.message));
+    await context.route(origin + '/s/**', route => {
+      const index = Number(new URL(route.request().url()).pathname.split('-').at(-1)); metadata.push(index);
+      return route.fulfill({ contentType: 'text/html', body: html(index, origin, false, 6) });
+    });
+    await context.route('https://reader-images.invalid/**', route => {
+      images.push(Number(route.request().url().match(/\/(\d+)\.svg$/)[1]));
+      return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1200"><rect width="100%" height="100%" fill="#dae7d4"/></svg>' });
+    });
+    try {
+      await page.goto(source(6, origin)); await page.addScriptTag({ content: script });
+      const host = page.locator('#eh-continuous-reader'), auto = host.locator('#reader-auto-toggle'), scroll = host.locator('#reader-scroll');
+      await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').shadowRoot.querySelector('[data-page="5"]')?.dataset.state === 'loaded');
+      await page.waitForFunction(() => document.querySelector('#eh-continuous-reader').dataset.first === '5');
+      await page.waitForTimeout(150);
+      assert.deepEqual([...new Set(metadata)].sort((a, b) => a - b), [1, 2, 5, 6], 'Tail and head must share the configured cache budget');
+      assert.deepEqual([...new Set(images)].sort((a, b) => a - b), [1, 2, 5, 6]);
+      assert.deepEqual(await host.locator('figure').evaluateAll(elements => elements.map(el => Number(el.dataset.page))), [5, 6], 'Cached head images must not disturb the visible tail');
+      await page.evaluate(() => {
+        const root = document.querySelector('#eh-continuous-reader').shadowRoot;
+        new MutationObserver(() => {
+          const status = root.getElementById('reader-status').textContent;
+          if (status.includes('等待循环') && !window.loopWaitStarted) window.loopWaitStarted = performance.now();
+          if (status === '已循环回首图。' && !window.loopCapture) {
+            const first = root.querySelector('[data-page="1"]');
+            window.loopCapture = { elapsed: performance.now() - window.loopWaitStarted, offset: first.getBoundingClientRect().top - root.getElementById('reader-scroll').getBoundingClientRect().top, running: root.getElementById('reader-auto-toggle').getAttribute('aria-pressed') };
+          }
+        }).observe(root.getElementById('reader-status'), { childList: true });
+      });
+      await auto.click();
+      await page.waitForFunction(() => window.loopWaitStarted > 0);
+      const waitingTop = await scroll.evaluate(el => el.scrollTop);
+      await page.waitForTimeout(350);
+      assert.equal(await scroll.evaluate(el => el.scrollTop), waitingTop, 'Both modes must wait at the end before looping');
+      if (mode === 'page') {
+        await scroll.dispatchEvent('wheel'); await page.waitForTimeout(800);
+        assert.equal(await page.evaluate(() => !!window.loopCapture), false, 'Pausing must cancel a pending loop');
+        await page.evaluate(() => { window.loopWaitStarted = 0; }); await auto.click();
+      }
+      await page.waitForFunction(() => !!window.loopCapture);
+      const capture = await page.evaluate(() => window.loopCapture);
+      assert.ok(capture.elapsed >= 950, 'Looping must honor the configured one-second interval');
+      assert.ok(Math.abs(capture.offset) < 1, 'Looping must align the first image at the top');
+      assert.equal(capture.running, 'true');
+      await scroll.dispatchEvent('wheel');
+      await host.locator('[data-section="reader-settings"] > summary').click();
+      assert.equal(await host.locator('#reader-auto-loop').isChecked(), true);
+      await host.locator('#reader-auto-loop').uncheck();
+      await host.locator('#reader-close').click(); await host.locator('#reader-start').click();
+      assert.equal(await host.locator('#reader-auto-loop').isChecked(), false);
+      assert.equal(await host.locator('#reader-auto-toggle').getAttribute('aria-pressed'), 'false');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await host.locator('[data-section="reader-settings"] > summary').evaluate(el => { el.parentElement.open = true; });
+      await page.screenshot({ path: 'test-results/reader-unified-settings-' + mode + '.png' });
+    } finally { await context.close(); }
+  }
+
   // Image paging must wait for its next image and align even a short final image.
   {
     const context = await browser.newContext({ viewport: { width: 800, height: 700 } });
@@ -298,7 +360,7 @@ try {
       await auto.click();
       await page.waitForFunction(() => {
         const root = document.querySelector('#eh-continuous-reader').shadowRoot;
-        return Math.abs(root.querySelector('[data-page="1"]').getBoundingClientRect().bottom - root.getElementById('reader-scroll').getBoundingClientRect().bottom) < 2;
+        return Math.abs(root.querySelector('[data-page="1"]').getBoundingClientRect().bottom - root.getElementById('reader-scroll').getBoundingClientRect().bottom) < 1;
       });
       const waitingTop = await scroll.evaluate(el => el.scrollTop);
       await page.waitForTimeout(150);
@@ -396,5 +458,5 @@ try {
     await context.close();
   }
   assert.deepEqual(errors, []);
-  console.log('Reader browser passed: EH/EX, image-top paging including a short final image, 25–200% image scaling with reading-position retention and horizontal panning, per-frame smooth motion, speed units and resize, pause/resume, persistence, loading waits, retry and native restoration.');
+  console.log('Reader browser passed: unified settings, image and smooth loops with end delay and pause cancellation, shared head/tail cache budget, EH/EX image-top paging, scaling, per-frame smooth motion, speed units, retry and native restoration.');
 } finally { await browser.close(); }

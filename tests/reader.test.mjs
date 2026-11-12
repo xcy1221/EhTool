@@ -8,6 +8,7 @@ const storeKey = 'eh-search-tool:ui:v1';
 const urlFor = (index, origin = 'https://e-hentai.org') => origin + '/s/token' + index + '/123-' + index;
 function fixture(index, total = 20) {
   return '<div id="i2"><div class="sn"><span>' + index + '</span> / <span>' + total + '</span></div></div>' +
+    '<a id="first" href="' + urlFor(1) + '">首图</a>' +
     (index > 1 ? '<a id="prev" href="' + urlFor(index - 1) + '">上一张</a>' : '') +
     (index < total ? '<a id="next" href="' + urlFor(index + 1) + '">下一张</a>' : '') +
     '<a href="/g/123/abcdef/">画廊</a><img id="img" width="400" height="800" src="https://images.example/' + index + '.jpg">';
@@ -23,7 +24,7 @@ function open(index = 6, settings = {}, failure = null, prepare = () => {}) {
   const dom = new JSDOM(fixture(index), { url: urlFor(index), runScripts: 'outside-only', pretendToBeVisual: true });
   const { window } = dom;
   const store = new Map([[storeKey, { ...settings, reader: { retryInterval: 0, ...settings.reader } }]]);
-  const requests = [], aborted = [], imageRequests = [];
+  const requests = [], aborted = [], imageRequests = [], imageElements = [];
   const native = window.document.getElementById('img');
   Object.defineProperties(native, { complete:{value:true,configurable:true},naturalWidth:{value:400,configurable:true},naturalHeight:{value:800,configurable:true} });
   window.GM_getValue = (key, fallback) => structuredClone(store.get(key) ?? fallback);
@@ -40,7 +41,7 @@ function open(index = 6, settings = {}, failure = null, prepare = () => {}) {
   };
   const src = Object.getOwnPropertyDescriptor(window.HTMLImageElement.prototype, 'src');
   Object.defineProperty(window.HTMLImageElement.prototype, 'src', { ...src, set(value) {
-    imageRequests.push(value); src.set.call(this, value);
+    imageRequests.push(value); imageElements.push(this); src.set.call(this, value);
     Object.defineProperty(this,'complete',{value:false,configurable:true});
     window.setTimeout(() => {
       if(this.getAttribute('src')!==value) return;
@@ -64,24 +65,47 @@ function open(index = 6, settings = {}, failure = null, prepare = () => {}) {
   prepare(window);
   window.eval(script);
   const host = window.document.getElementById('eh-continuous-reader'), root = host.shadowRoot;
-  return { dom, window, store, host, root, requests, aborted, imageRequests, native, close() { window.dispatchEvent(new window.Event('pagehide')); dom.window.close(); }, scroll: root.getElementById('reader-scroll') };
+  return { dom, window, store, host, root, requests, aborted, imageRequests, imageElements, native, close() { window.dispatchEvent(new window.Event('pagehide')); dom.window.close(); }, scroll: root.getElementById('reader-scroll') };
 }
 
 test('parser uses same-gallery adjacent links and rejects broken pages', () => {
   const dom = new JSDOM('', { url: urlFor(3), runScripts: 'outside-only' });
   try {
-    dom.window.eval(reader + '\nwindow.parsePage = parseReaderPage; window.bounds = readerBounds;');
+    dom.window.eval(reader + '\nwindow.parsePage = parseReaderPage; window.bounds = readerBounds; window.cacheWindow = readerWindow;');
     const doc = new dom.window.DOMParser().parseFromString(fixture(3), 'text/html');
     doc.querySelector('#next').href = 'https://exhentai.org/s/token4/123-4';
     doc.body.insertAdjacentHTML('beforeend', '<a href="/s/other/999-4">Wrong gallery</a><a href="/s/token4/123-4">Valid fallback</a>');
     const parsed = dom.window.parsePage(doc, urlFor(3));
     assert.equal(parsed.next, urlFor(4)); assert.equal(parsed.prev, urlFor(2));
+    assert.equal(parsed.first, urlFor(1));
     assert.equal(parsed.total, 20); assert.equal(parsed.width, 400); assert.equal(parsed.height, 800);
     assert.throws(() => dom.window.parsePage(new dom.window.DOMParser().parseFromString('<p>Login required</p>', 'text/html'), urlFor(3)));
     assert.deepEqual(JSON.parse(JSON.stringify(dom.window.bounds(6, 7, 1, { ahead: 5, behind: 3 }, 20))), { first: 3, last: 12 });
     assert.deepEqual(JSON.parse(JSON.stringify(dom.window.bounds(6, 7, -1, { ahead: 5, behind: 3 }, 20))), { first: 1, last: 10 });
     assert.deepEqual(JSON.parse(JSON.stringify(dom.window.bounds(1, 2, -1, { ahead: 5, behind: 3 }, 3))), { first: 1, last: 3 });
+    const cached = (...args) => [...dom.window.cacheWindow(...args)];
+    assert.deepEqual(cached(20, 20, 1, { ahead: 2, behind: 1 }, 20), [19, 20, 1, 2]);
+    assert.deepEqual(cached(19, 20, -1, { ahead: 5, behind: 3 }, 20), [14, 15, 16, 17, 18, 19, 20, 1, 2, 3]);
+    assert.deepEqual(cached(1, 1, 1, { ahead: 5, behind: 3 }, 3), [1, 2, 3]);
+    assert.deepEqual(cached(20, 20, 1, { ahead: 0, behind: 0 }, 20), [20]);
   } finally { dom.window.close(); }
+});
+
+test('tail preloading wraps into the head within budget without inserting distant images into the reading flow', async () => {
+  const app = open(20, { reader: { ahead: 2, behind: 1 } });
+  try {
+    await until(() => app.imageRequests.includes('https://images.example/2.jpg'));
+    await until(() => app.root.querySelector('[data-page="19"]')?.dataset.state === 'loaded');
+    await until(() => app.imageElements.every(image => image.complete));
+    assert.deepEqual(app.requests.map(request => request.index).sort((a, b) => a - b), [1, 2, 19]);
+    assert.deepEqual([...app.root.querySelectorAll('figure')].map(el => Number(el.dataset.page)), [19, 20]);
+    assert.equal(app.imageElements.filter(image => image.getAttribute('src')).length + 1, 4, 'Two ahead plus one visible and one behind');
+    const headImages = app.imageElements.filter(image => /\/(1|2)\.jpg$/.test(image.src));
+    assert.equal(headImages.length, 2);
+    app.scroll.scrollTop -= 808; app.scroll.dispatchEvent(new app.window.Event('scroll'));
+    await until(() => app.host.dataset.first === '17' && app.root.querySelector('[data-page="17"]')?.dataset.state === 'loaded');
+    assert.ok(headImages.every(image => !image.getAttribute('src')), 'Leaving the wrap window must release cached head images');
+  } finally { app.close(); }
 });
 
 test('continuous reader preloads five ahead, retains three behind, reverses and preserves placeholders', async () => {
@@ -162,6 +186,8 @@ test('auto paging settings validate, persist and never resume without a user act
     assert.equal(field('reader-auto-speed').value, '40');
     assert.equal(field('reader-auto-speed-unit').value, 'pixels');
     assert.equal(field('reader-auto-page-seconds').value, '20');
+    assert.equal(field('reader-auto-loop').checked, false);
+    assert.equal(app.root.querySelector('[data-section="reader-auto-settings"]'), null);
     change('reader-auto-mode', 'smooth'); change('reader-auto-interval', '2'); change('reader-auto-speed', '150');
     change('reader-auto-interval', '301'); change('reader-auto-speed', '');
     assert.equal(field('reader-auto-interval').value, '2');
@@ -176,6 +202,8 @@ test('auto paging settings validate, persist and never resume without a user act
     change('reader-auto-speed-unit', 'pixels');
     assert.equal(field('reader-auto-speed').value, '150');
     change('reader-auto-speed-unit', 'seconds');
+    field('reader-auto-loop').checked = true; field('reader-auto-loop').dispatchEvent(new app.window.Event('change'));
+    assert.equal(field('reader-auto-interval-label').hidden, false);
     field('reader-auto-toggle').click();
     assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'true');
     Object.defineProperty(app.window.document, 'hidden', { value: true, configurable: true });
@@ -187,6 +215,7 @@ test('auto paging settings validate, persist and never resume without a user act
     assert.equal(field('reader-auto-speed').value, '150');
     assert.equal(field('reader-auto-speed-unit').value, 'seconds');
     assert.equal(field('reader-auto-page-seconds').value, '12');
+    assert.equal(field('reader-auto-loop').checked, true);
     assert.equal(field('reader-auto-toggle').getAttribute('aria-pressed'), 'false');
     assert.equal(app.store.has('eh-search-tool:v1'), false);
     field('reader-auto-toggle').click();
