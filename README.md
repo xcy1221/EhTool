@@ -108,3 +108,7 @@ npm run test:reader-browser
 
 - 当前项目版本统一索引见 [VERSION](VERSION)，与 `package.json` 保持一致；沿用现有构建和发布流程。
 - 是否仍在维护以 [STATUS.md](STATUS.md) 的 `maintenance_status` 为准；维护结论变化时同步该文件及本节。
+
+## 项目图标
+
+用户已确认的素材与路径见[项目图标](docs/项目图标.md)。
